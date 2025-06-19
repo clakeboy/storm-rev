@@ -23,10 +23,10 @@ func NewFieldMatcher(field string, fm FieldMatcher) Matcher {
 // most common Matcher: A Matcher that evaluates one field's value.
 // For more complex scenarios, implement the Matcher interface directly.
 type FieldMatcher interface {
-	MatchField(v interface{}) (bool, error)
+	MatchField(v any) (bool, error)
 }
 
-func (r fieldMatcherDelegate) Match(i interface{}) (bool, error) {
+func (r fieldMatcherDelegate) Match(i any) (bool, error) {
 	v := reflect.Indirect(reflect.ValueOf(i))
 	return r.MatchValue(&v)
 }
@@ -49,7 +49,7 @@ type field2fieldMatcherDelegate struct {
 	Tok            token.Token
 }
 
-func (r field2fieldMatcherDelegate) Match(i interface{}) (bool, error) {
+func (r field2fieldMatcherDelegate) Match(i any) (bool, error) {
 	v := reflect.Indirect(reflect.ValueOf(i))
 	return r.MatchValue(&v)
 }

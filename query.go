@@ -30,16 +30,16 @@ type Query interface {
 	Bucket(string) Query
 
 	// Find a list of matching records
-	Find(interface{}) error
+	Find(any) error
 
 	// First gets the first matching record
-	First(interface{}) error
+	First(any) error
 
 	// Delete all matching records
-	Delete(interface{}) error
+	Delete(any) error
 
 	// Count all the matching records
-	Count(interface{}) (int, error)
+	Count(any) (int, error)
 
 	// Returns all the records without decoding them
 	Raw() ([][]byte, error)
@@ -48,7 +48,7 @@ type Query interface {
 	RawEach(func([]byte, []byte) error) error
 
 	// Execute the given function for each element
-	Each(interface{}, func(interface{}) error) error
+	Each(any, func(any) error) error
 }
 
 func newQuery(n *node, tree q.Matcher) *query {
@@ -95,7 +95,7 @@ func (q *query) Bucket(bucketName string) Query {
 	return q
 }
 
-func (q *query) Find(to interface{}) error {
+func (q *query) Find(to any) error {
 	sink, err := newListSink(q.node, to)
 	if err != nil {
 		return err
@@ -104,7 +104,7 @@ func (q *query) Find(to interface{}) error {
 	return q.runQuery(sink)
 }
 
-func (q *query) First(to interface{}) error {
+func (q *query) First(to any) error {
 	sink, err := newFirstSink(q.node, to)
 	if err != nil {
 		return err
@@ -114,7 +114,7 @@ func (q *query) First(to interface{}) error {
 	return q.runQuery(sink)
 }
 
-func (q *query) Delete(kind interface{}) error {
+func (q *query) Delete(kind any) error {
 	sink, err := newDeleteSink(q.node, kind)
 	if err != nil {
 		return err
@@ -123,7 +123,7 @@ func (q *query) Delete(kind interface{}) error {
 	return q.runQuery(sink)
 }
 
-func (q *query) Count(kind interface{}) (int, error) {
+func (q *query) Count(kind any) (int, error) {
 	sink, err := newCountSink(q.node, kind)
 	if err != nil {
 		return 0, err
@@ -156,7 +156,7 @@ func (q *query) RawEach(fn func([]byte, []byte) error) error {
 	return q.runQuery(sink)
 }
 
-func (q *query) Each(kind interface{}, fn func(interface{}) error) error {
+func (q *query) Each(kind any, fn func(any) error) error {
 	sink, err := newEachSink(kind)
 	if err != nil {
 		return err

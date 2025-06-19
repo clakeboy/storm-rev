@@ -7,7 +7,7 @@ import (
 	"strconv"
 )
 
-func compare(a, b interface{}, tok token.Token) bool {
+func compare(a, b any, tok token.Token) bool {
 	vala := reflect.ValueOf(a)
 	valb := reflect.ValueOf(b)
 

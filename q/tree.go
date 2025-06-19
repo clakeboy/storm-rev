@@ -9,7 +9,7 @@ import (
 // A Matcher is used to test against a record to see if it matches.
 type Matcher interface {
 	// Match is used to test the criteria against a structure.
-	Match(interface{}) (bool, error)
+	Match(any) (bool, error)
 }
 
 // A ValueMatcher is used to test against a reflect.Value.
@@ -20,17 +20,17 @@ type ValueMatcher interface {
 }
 
 type cmp struct {
-	value interface{}
+	value any
 	token token.Token
 }
 
-func (c *cmp) MatchField(v interface{}) (bool, error) {
+func (c *cmp) MatchField(v any) (bool, error) {
 	return compare(v, c.value, c.token), nil
 }
 
 type trueMatcher struct{}
 
-func (*trueMatcher) Match(i interface{}) (bool, error) {
+func (*trueMatcher) Match(i any) (bool, error) {
 	return true, nil
 }
 
@@ -42,7 +42,7 @@ type or struct {
 	children []Matcher
 }
 
-func (c *or) Match(i interface{}) (bool, error) {
+func (c *or) Match(i any) (bool, error) {
 	v := reflect.Indirect(reflect.ValueOf(i))
 	return c.MatchValue(&v)
 }
@@ -76,7 +76,7 @@ type and struct {
 	children []Matcher
 }
 
-func (c *and) Match(i interface{}) (bool, error) {
+func (c *and) Match(i any) (bool, error) {
 	v := reflect.Indirect(reflect.ValueOf(i))
 	return c.MatchValue(&v)
 }
@@ -108,18 +108,18 @@ func (c *and) MatchValue(v *reflect.Value) (bool, error) {
 
 type strictEq struct {
 	field string
-	value interface{}
+	value any
 }
 
-func (s *strictEq) MatchField(v interface{}) (bool, error) {
+func (s *strictEq) MatchField(v any) (bool, error) {
 	return reflect.DeepEqual(v, s.value), nil
 }
 
 type in struct {
-	list interface{}
+	list any
 }
 
-func (i *in) MatchField(v interface{}) (bool, error) {
+func (i *in) MatchField(v any) (bool, error) {
 	ref := reflect.ValueOf(i.list)
 	if ref.Kind() != reflect.Slice {
 		return false, nil
@@ -147,7 +147,7 @@ type not struct {
 	children []Matcher
 }
 
-func (n *not) Match(i interface{}) (bool, error) {
+func (n *not) Match(i any) (bool, error) {
 	v := reflect.Indirect(reflect.ValueOf(i))
 	return n.MatchValue(&v)
 }
@@ -174,7 +174,7 @@ func (n *not) MatchValue(v *reflect.Value) (bool, error) {
 }
 
 // Eq matcher, checks if the given field is equal to the given value
-func Eq(field string, v interface{}) Matcher {
+func Eq(field string, v any) Matcher {
 	return NewFieldMatcher(field, &cmp{value: v, token: token.EQL})
 }
 
@@ -184,12 +184,12 @@ func EqF(field1, field2 string) Matcher {
 }
 
 // StrictEq matcher, checks if the given field is deeply equal to the given value
-func StrictEq(field string, v interface{}) Matcher {
+func StrictEq(field string, v any) Matcher {
 	return NewFieldMatcher(field, &strictEq{value: v})
 }
 
 // Gt matcher, checks if the given field is greater than the given value
-func Gt(field string, v interface{}) Matcher {
+func Gt(field string, v any) Matcher {
 	return NewFieldMatcher(field, &cmp{value: v, token: token.GTR})
 }
 
@@ -199,7 +199,7 @@ func GtF(field1, field2 string) Matcher {
 }
 
 // Gte matcher, checks if the given field is greater than or equal to the given value
-func Gte(field string, v interface{}) Matcher {
+func Gte(field string, v any) Matcher {
 	return NewFieldMatcher(field, &cmp{value: v, token: token.GEQ})
 }
 
@@ -209,7 +209,7 @@ func GteF(field1, field2 string) Matcher {
 }
 
 // Lt matcher, checks if the given field is lesser than the given value
-func Lt(field string, v interface{}) Matcher {
+func Lt(field string, v any) Matcher {
 	return NewFieldMatcher(field, &cmp{value: v, token: token.LSS})
 }
 
@@ -219,7 +219,7 @@ func LtF(field1, field2 string) Matcher {
 }
 
 // Lte matcher, checks if the given field is lesser than or equal to the given value
-func Lte(field string, v interface{}) Matcher {
+func Lte(field string, v any) Matcher {
 	return NewFieldMatcher(field, &cmp{value: v, token: token.LEQ})
 }
 
@@ -230,7 +230,7 @@ func LteF(field1, field2 string) Matcher {
 
 // In matcher, checks if the given field matches one of the value of the given slice.
 // v must be a slice.
-func In(field string, v interface{}) Matcher {
+func In(field string, v any) Matcher {
 	return NewFieldMatcher(field, &in{list: v})
 }
 

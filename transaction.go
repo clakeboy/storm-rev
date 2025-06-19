@@ -1,7 +1,5 @@
 package storm
 
-import bolt "go.etcd.io/bbolt"
-
 // Tx is a transaction.
 type Tx interface {
 	// Commit writes all changes to disk.
@@ -30,9 +28,9 @@ func (n *node) Rollback() error {
 	}
 
 	err := n.tx.Rollback()
-	if err == bolt.ErrTxClosed {
-		return ErrNotInTransaction
-	}
+	// if err == bolt.ErrTxClosed {
+	// 	return ErrNotInTransaction
+	// }
 
 	return err
 }
@@ -44,9 +42,9 @@ func (n *node) Commit() error {
 	}
 
 	err := n.tx.Commit()
-	if err == bolt.ErrTxClosed {
-		return ErrNotInTransaction
-	}
+	// if err == bolt.ErrTxClosed {
+	// 	return ErrNotInTransaction
+	// }
 
 	return err
 }

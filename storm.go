@@ -102,7 +102,7 @@ func (s *DB) checkVersion() error {
 }
 
 // toBytes turns an interface into a slice of bytes
-func toBytes(key interface{}, codec codec.MarshalUnmarshaler) ([]byte, error) {
+func toBytes(key any, codec codec.MarshalUnmarshaler) ([]byte, error) {
 	if key == nil {
 		return nil, nil
 	}
@@ -122,7 +122,7 @@ func toBytes(key interface{}, codec codec.MarshalUnmarshaler) ([]byte, error) {
 	}
 }
 
-func numbertob(v interface{}) ([]byte, error) {
+func numbertob(v any) ([]byte, error) {
 	var buf bytes.Buffer
 	err := binary.Write(&buf, binary.BigEndian, v)
 	if err != nil {

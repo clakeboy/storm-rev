@@ -221,6 +221,9 @@ func isZero(v *reflect.Value) bool {
 }
 
 func isInteger(v *reflect.Value) bool {
+	if v == nil {
+		return false
+	}
 	kind := v.Kind()
-	return v != nil && kind >= reflect.Int && kind <= reflect.Uint64
+	return kind >= reflect.Int && kind <= reflect.Uint64
 }
