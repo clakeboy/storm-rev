@@ -62,6 +62,7 @@ func compare(a, b any, tok token.Token) bool {
 			return constant.Compare(constant.MakeFloat64(float64(vala.Uint())), tok, constant.MakeFloat64(bla))
 		}
 	case ak == reflect.Float32 || ak == reflect.Float64:
+		// fmt.Println("float compare", ak, bk)
 		if bk == reflect.Float32 || bk == reflect.Float64 {
 			return constant.Compare(constant.MakeFloat64(vala.Float()), tok, constant.MakeFloat64(valb.Float()))
 		}

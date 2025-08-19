@@ -1,6 +1,7 @@
 package storm
 
 import (
+	"encoding/json"
 	"reflect"
 	"sort"
 	"time"
@@ -47,19 +48,19 @@ func (s *sorter) filter(tree q.Matcher, bucket *bolt.Bucket, k, v []byte) (bool,
 		k:      k,
 		v:      v,
 	}
-	rsink, ok := s.sink.(reflectSink)
-	if !ok {
-		return s.add(itm)
-	}
+	// rsink, ok := s.sink.(reflectSink)
+	// if !ok {
+	// 	return s.add(itm)
+	// }
 
-	newElem := rsink.elem()
-	if err := s.node.Codec().Unmarshal(v, newElem.Interface()); err != nil {
-		return false, err
-	}
-	itm.value = &newElem
+	// newElem := rsink.elem()
+	// if err := s.node.Codec().Unmarshal(v, newElem.Interface()); err != nil {
+	// 	return false, err
+	// }
+	// itm.value = &newElem
 
 	if tree != nil {
-		ok, err := tree.Match(newElem.Interface())
+		ok, err := tree.Match(v)
 		if err != nil {
 			return false, err
 		}
@@ -224,27 +225,21 @@ func (s *sorter) flush() error {
 	}
 
 	if ssink, ok := s.sink.(sliceSink); ok {
-		if !ssink.slice().IsValid() {
-			return s.sink.flush()
-		}
-		if s.skip >= ssink.slice().Len() {
+		// if !ssink.slice().IsValid() {
+		// 	return s.sink.flush()
+		// }
+		if s.skip >= len(ssink.slice()) {
 			ssink.reset()
 			return s.sink.flush()
 		}
-		leftBound := s.skip
-		if leftBound < 0 {
-			leftBound = 0
-		}
-		limit := s.limit
-		if s.limit < 0 {
-			limit = 0
-		}
+		leftBound := max(s.skip, 0)
+		limit := max(s.limit, 0)
 
 		rightBound := leftBound + limit
-		if rightBound > ssink.slice().Len() || rightBound == leftBound {
-			rightBound = ssink.slice().Len()
+		if rightBound > len(ssink.slice()) || rightBound == leftBound {
+			rightBound = len(ssink.slice())
 		}
-		ssink.setSlice(ssink.slice().Slice(leftBound, rightBound))
+		ssink.setSlice(ssink.slice()[leftBound:rightBound])
 		return s.sink.flush()
 	}
 
@@ -272,7 +267,7 @@ func (s *sorter) Len() int {
 	default:
 	}
 	if ssink, ok := s.sink.(sliceSink); ok {
-		return ssink.slice().Len()
+		return len(ssink.slice())
 	}
 	return len(s.list)
 
@@ -287,7 +282,7 @@ func (s *sorter) Less(i, j int) bool {
 	}
 
 	if ssink, ok := s.sink.(sliceSink); ok {
-		return s.less(ssink.slice().Index(i), ssink.slice().Index(j))
+		return s.less(reflect.ValueOf(ssink.slice()[i]), reflect.ValueOf(ssink.slice()[j]))
 	}
 	return s.less(*s.list[i].value, *s.list[j].value)
 }
@@ -304,8 +299,8 @@ type reflectSink interface {
 }
 
 type sliceSink interface {
-	slice() reflect.Value
-	setSlice(reflect.Value)
+	slice() []any
+	setSlice([]any)
 	reset()
 }
 
@@ -333,36 +328,36 @@ func newListSink(node Node, to interface{}) (*listSink, error) {
 		isPtr:    sliceType.Elem().Kind() == reflect.Ptr,
 		elemType: elemType,
 		name:     elemType.Name(),
-		results:  reflect.MakeSlice(reflect.Indirect(ref).Type(), 0, 0),
+		results:  make([]any, 0),
 	}, nil
 }
 
 type listSink struct {
 	node     Node
 	ref      reflect.Value
-	results  reflect.Value
+	results  []any
 	elemType reflect.Type
 	name     string
 	isPtr    bool
 	idx      int
 }
 
-func (l *listSink) slice() reflect.Value {
+func (l *listSink) slice() []any {
 	return l.results
 }
 
-func (l *listSink) setSlice(s reflect.Value) {
+func (l *listSink) setSlice(s []any) {
 	l.results = s
 }
 
 func (l *listSink) reset() {
-	l.results = reflect.MakeSlice(reflect.Indirect(l.ref).Type(), 0, 0)
+	// l.results = reflect.MakeSlice(reflect.Indirect(l.ref).Type(), 0, 0)
 }
 
 func (l *listSink) elem() reflect.Value {
-	if l.results.IsValid() && l.idx < l.results.Len() {
-		return l.results.Index(l.idx).Addr()
-	}
+	// if l.results.IsValid() && l.idx < l.results.Len() {
+	// 	return l.results.Index(l.idx).Addr()
+	// }
 	return reflect.New(l.elemType)
 }
 
@@ -371,11 +366,11 @@ func (l *listSink) bucketName() string {
 }
 
 func (l *listSink) add(i *item) error {
-	if l.idx == l.results.Len() {
+	if l.idx == len(l.results) {
 		if l.isPtr {
-			l.results = reflect.Append(l.results, *i.value)
+			l.results = append(l.results, i.v)
 		} else {
-			l.results = reflect.Append(l.results, reflect.Indirect(*i.value))
+			l.results = append(l.results, nil)
 		}
 	}
 
@@ -385,8 +380,18 @@ func (l *listSink) add(i *item) error {
 }
 
 func (l *listSink) flush() error {
-	if l.results.IsValid() && l.results.Len() > 0 {
-		reflect.Indirect(l.ref).Set(l.results)
+	if len(l.results) > 0 {
+		tmplist := reflect.MakeSlice(reflect.Indirect(l.ref).Type(), len(l.results), len(l.results))
+		for i, v := range l.results {
+			if l.isPtr {
+				pr := l.elem()
+				json.Unmarshal(v.([]byte), pr.Interface())
+				tmplist.Index(i).Set(pr)
+			} else {
+				tmplist.Index(i).Set(l.elem())
+			}
+		}
+		reflect.Indirect(l.ref).Set(tmplist)
 		return nil
 	}
 

@@ -1,6 +1,9 @@
 package storm
 
 import (
+	"fmt"
+
+	"github.com/clakeboy/golib/utils"
 	"github.com/clakeboy/storm-rev/internal"
 	"github.com/clakeboy/storm-rev/q"
 	bolt "go.etcd.io/bbolt"
@@ -199,9 +202,12 @@ func (q *query) query(tx *bolt.Tx, sink sink) error {
 	sorter.limit = q.limit
 	if bucket != nil {
 		c := internal.Cursor{C: bucket.Cursor(), Reverse: q.reverse}
-		// rt := utils.NewExecTime()
-		// rt.Start()
+		rt := utils.NewExecTime()
+		rt.Start()
+		// vt := utils.NewExecTime()
+		idx := 0
 		for k, v := c.First(); k != nil; k, v = c.Next() {
+			idx++
 			if v == nil {
 				continue
 			}
@@ -210,8 +216,9 @@ func (q *query) query(tx *bolt.Tx, sink sink) error {
 			// 	q.skip--
 			// 	continue
 			// }
-
+			// vt.Start()
 			stop, err := sorter.filter(q.tree, bucket, k, v)
+			// fmt.Println("evey ", vt.End(false))
 			if err != nil {
 				return err
 			}
@@ -219,7 +226,7 @@ func (q *query) query(tx *bolt.Tx, sink sink) error {
 				break
 			}
 		}
-		// fmt.Println("query time:", rt.End(false))
+		fmt.Println("query time:", rt.End(false), idx)
 	}
 
 	return sorter.flush()

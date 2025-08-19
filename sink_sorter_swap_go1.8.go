@@ -1,3 +1,4 @@
+//go:build go1.8
 // +build go1.8
 
 package storm
@@ -13,7 +14,7 @@ func (s *sorter) Swap(i, j int) {
 	}
 
 	if ssink, ok := s.sink.(sliceSink); ok {
-		reflect.Swapper(ssink.slice().Interface())(i, j)
+		reflect.Swapper(ssink.slice())(i, j)
 	} else {
 		s.list[i], s.list[j] = s.list[j], s.list[i]
 	}

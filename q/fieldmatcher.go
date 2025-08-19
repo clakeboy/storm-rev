@@ -2,8 +2,12 @@ package q
 
 import (
 	"errors"
+	"fmt"
 	"go/token"
 	"reflect"
+	"strings"
+
+	"github.com/tidwall/gjson"
 )
 
 // ErrUnknownField is returned when an unknown field is passed.
@@ -27,16 +31,37 @@ type FieldMatcher interface {
 }
 
 func (r fieldMatcherDelegate) Match(i any) (bool, error) {
-	v := reflect.Indirect(reflect.ValueOf(i))
-	return r.MatchValue(&v)
+	// v := reflect.Indirect(reflect.ValueOf(i))
+	return r.MatchValue(i)
 }
 
-func (r fieldMatcherDelegate) MatchValue(v *reflect.Value) (bool, error) {
-	field := v.FieldByName(r.Field)
-	if !field.IsValid() {
+func (r fieldMatcherDelegate) MatchValue(v any) (bool, error) {
+	// field := v.FieldByName(r.Field)
+	// if !field.IsValid() {
+	// 	return false, ErrUnknownField
+	// }
+	res := gjson.GetBytes(v.([]byte), strings.ToLower(r.Field))
+	if !res.Exists() {
 		return false, ErrUnknownField
 	}
-	return r.MatchField(field.Interface())
+	var val any
+	switch res.Type {
+	case gjson.String:
+		val = res.Str
+	case gjson.Number:
+		val = res.Num
+	case gjson.True:
+		val = true
+	case gjson.False:
+		val = false
+	case gjson.JSON:
+		val = res.Raw
+	}
+	return r.MatchField(val)
+}
+
+func (r fieldMatcherDelegate) GetField() string {
+	return r.Field
 }
 
 // NewField2FieldMatcher creates a Matcher for a given field1 and field2.
@@ -64,4 +89,8 @@ func (r field2fieldMatcherDelegate) MatchValue(v *reflect.Value) (bool, error) {
 		return false, ErrUnknownField
 	}
 	return compare(field1.Interface(), field2.Interface(), r.Tok), nil
+}
+
+func (r field2fieldMatcherDelegate) GetField() string {
+	return fmt.Sprintf("%s_%s", r.Field1, r.Field2)
 }

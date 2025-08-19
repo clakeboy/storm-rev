@@ -35,10 +35,10 @@ type UniqueIndex struct {
 
 // Add a value to the unique index
 func (idx *UniqueIndex) Add(value []byte, targetID []byte) error {
-	if value == nil || len(value) == 0 {
+	if len(value) == 0 {
 		return ErrNilParam
 	}
-	if targetID == nil || len(targetID) == 0 {
+	if len(targetID) == 0 {
 		return ErrNilParam
 	}
 

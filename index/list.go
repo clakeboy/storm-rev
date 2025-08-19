@@ -42,10 +42,10 @@ type ListIndex struct {
 
 // Add a value to the list index
 func (idx *ListIndex) Add(newValue []byte, targetID []byte) error {
-	if newValue == nil || len(newValue) == 0 {
+	if len(newValue) == 0 {
 		return ErrNilParam
 	}
-	if targetID == nil || len(targetID) == 0 {
+	if len(targetID) == 0 {
 		return ErrNilParam
 	}
 

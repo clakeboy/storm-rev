@@ -30,3 +30,8 @@ _testmain.go
 
 # Golang vendor folder
 /vendor/
+
+#tmp db folder
+/dbs/
+# qeury test
+query2_test.go

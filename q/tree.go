@@ -10,13 +10,14 @@ import (
 type Matcher interface {
 	// Match is used to test the criteria against a structure.
 	Match(any) (bool, error)
+	GetField() string
 }
 
 // A ValueMatcher is used to test against a reflect.Value.
 type ValueMatcher interface {
 	// MatchValue tests if the given reflect.Value matches.
 	// It is useful when the reflect.Value of an object already exists.
-	MatchValue(*reflect.Value) (bool, error)
+	MatchValue(any) (bool, error)
 }
 
 type cmp struct {
@@ -34,8 +35,12 @@ func (*trueMatcher) Match(i any) (bool, error) {
 	return true, nil
 }
 
-func (*trueMatcher) MatchValue(v *reflect.Value) (bool, error) {
+func (*trueMatcher) MatchValue(v any) (bool, error) {
 	return true, nil
+}
+
+func (*trueMatcher) GetField() string {
+	return ""
 }
 
 type or struct {
@@ -47,7 +52,11 @@ func (c *or) Match(i any) (bool, error) {
 	return c.MatchValue(&v)
 }
 
-func (c *or) MatchValue(v *reflect.Value) (bool, error) {
+func (*or) GetField() string {
+	return ""
+}
+
+func (c *or) MatchValue(v any) (bool, error) {
 	for _, matcher := range c.children {
 		if vm, ok := matcher.(ValueMatcher); ok {
 			ok, err := vm.MatchValue(v)
@@ -60,7 +69,7 @@ func (c *or) MatchValue(v *reflect.Value) (bool, error) {
 			continue
 		}
 
-		ok, err := matcher.Match(v.Interface())
+		ok, err := matcher.Match(v)
 		if err != nil {
 			return false, err
 		}
@@ -76,12 +85,16 @@ type and struct {
 	children []Matcher
 }
 
-func (c *and) Match(i any) (bool, error) {
-	v := reflect.Indirect(reflect.ValueOf(i))
-	return c.MatchValue(&v)
+func (*and) GetField() string {
+	return ""
 }
 
-func (c *and) MatchValue(v *reflect.Value) (bool, error) {
+func (c *and) Match(i any) (bool, error) {
+	// v := reflect.Indirect(reflect.ValueOf(i))
+	return c.MatchValue(i)
+}
+
+func (c *and) MatchValue(v any) (bool, error) {
 	for _, matcher := range c.children {
 		if vm, ok := matcher.(ValueMatcher); ok {
 			ok, err := vm.MatchValue(v)
@@ -94,7 +107,7 @@ func (c *and) MatchValue(v *reflect.Value) (bool, error) {
 			continue
 		}
 
-		ok, err := matcher.Match(v.Interface())
+		ok, err := matcher.Match(v)
 		if err != nil {
 			return false, err
 		}
@@ -150,6 +163,10 @@ type not struct {
 func (n *not) Match(i any) (bool, error) {
 	v := reflect.Indirect(reflect.ValueOf(i))
 	return n.MatchValue(&v)
+}
+
+func (*not) GetField() string {
+	return ""
 }
 
 func (n *not) MatchValue(v *reflect.Value) (bool, error) {

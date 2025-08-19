@@ -192,7 +192,9 @@ func (n *node) find(tx *bolt.Tx, bucketName, fieldName string, cfg *structConfig
 		return err
 	}
 
-	sink.results = reflect.MakeSlice(reflect.Indirect(sink.ref).Type(), len(list), len(list))
+	// sink.results = reflect.MakeSlice(reflect.Indirect(sink.ref).Type(), len(list), len(list))
+
+	sink.results = make([]any, len(list))
 
 	sorter := newSorter(n, sink)
 	for i := range list {
@@ -391,7 +393,7 @@ func (n *node) rnge(tx *bolt.Tx, bucketName, fieldName string, cfg *structConfig
 		return err
 	}
 
-	sink.results = reflect.MakeSlice(reflect.Indirect(sink.ref).Type(), len(list), len(list))
+	sink.results = make([]any, len(list))
 	sorter := newSorter(n, sink)
 	for i := range list {
 		raw := bucket.Get(list[i])
@@ -477,7 +479,7 @@ func (n *node) prefix(tx *bolt.Tx, bucketName, fieldName string, cfg *structConf
 		return err
 	}
 
-	sink.results = reflect.MakeSlice(reflect.Indirect(sink.ref).Type(), len(list), len(list))
+	sink.results = make([]any, len(list))
 	sorter := newSorter(n, sink)
 	for i := range list {
 		raw := bucket.Get(list[i])
