@@ -352,6 +352,7 @@ func (l *listSink) setSlice(s []any) {
 
 func (l *listSink) reset() {
 	// l.results = reflect.MakeSlice(reflect.Indirect(l.ref).Type(), 0, 0)
+	l.results = make([]any, 0)
 }
 
 func (l *listSink) elem() reflect.Value {
@@ -514,7 +515,7 @@ func (d *deleteSink) readOnly() bool {
 	return false
 }
 
-func newCountSink(node Node, kind interface{}) (*countSink, error) {
+func newCountSink(node Node, kind any) (*countSink, error) {
 	ref := reflect.ValueOf(kind)
 
 	if !ref.IsValid() || ref.Kind() != reflect.Ptr || ref.Elem().Kind() != reflect.Struct {

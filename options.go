@@ -33,6 +33,13 @@ func Batch() func(*Options) error {
 	}
 }
 
+func Debug() func(*Options) error {
+	return func(opts *Options) error {
+		opts.debug = true
+		return nil
+	}
+}
+
 // Root used to set the root bucket. See also the From method.
 func Root(root ...string) func(*Options) error {
 	return func(opts *Options) error {
@@ -94,4 +101,7 @@ type Options struct {
 
 	// Bolt is still easily accessible
 	bolt *bolt.DB
+
+	// debug mode
+	debug bool
 }

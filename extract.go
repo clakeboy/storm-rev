@@ -30,6 +30,7 @@ type fieldConfig struct {
 	IsInteger      bool
 	Value          *reflect.Value
 	ForceUpdate    bool
+	JsonFieldName  string
 }
 
 // structConfig is a structure gathering all the relevant informations about a model
@@ -107,6 +108,7 @@ func extractField(value *reflect.Value, field *reflect.StructField, m *structCon
 			IsInteger:      isInteger(value),
 			Value:          value,
 			IncrementStart: 1,
+			JsonFieldName:  field.Tag.Get("json"),
 		}
 
 		tags := strings.Split(tag, ",")
@@ -171,10 +173,18 @@ func extractField(value *reflect.Value, field *reflect.StructField, m *structCon
 				IsID:           true,
 				Value:          value,
 				IncrementStart: 1,
+				JsonFieldName:  field.Tag.Get("json"),
 			}
 			m.Fields[field.Name] = f
 		}
 		m.ID = f
+	}
+	if _, ok := m.Fields[field.Name]; !ok {
+		f = &fieldConfig{
+			Name:          field.Name,
+			JsonFieldName: field.Tag.Get("json"),
+		}
+		m.Fields[field.Name] = f
 	}
 
 	return nil

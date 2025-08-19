@@ -20,7 +20,7 @@ type fieldMatcherDelegate struct {
 
 // NewFieldMatcher creates a Matcher for a given field.
 func NewFieldMatcher(field string, fm FieldMatcher) Matcher {
-	return fieldMatcherDelegate{Field: field, FieldMatcher: fm}
+	return &fieldMatcherDelegate{Field: field, FieldMatcher: fm}
 }
 
 // FieldMatcher can be used in NewFieldMatcher as a simple way to create the
@@ -64,9 +64,13 @@ func (r fieldMatcherDelegate) GetField() string {
 	return r.Field
 }
 
+func (r *fieldMatcherDelegate) SetField(field string) {
+	r.Field = field
+}
+
 // NewField2FieldMatcher creates a Matcher for a given field1 and field2.
 func NewField2FieldMatcher(field1, field2 string, tok token.Token) Matcher {
-	return field2fieldMatcherDelegate{Field1: field1, Field2: field2, Tok: tok}
+	return &field2fieldMatcherDelegate{Field1: field1, Field2: field2, Tok: tok}
 }
 
 type field2fieldMatcherDelegate struct {

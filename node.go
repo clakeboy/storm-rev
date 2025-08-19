@@ -58,6 +58,9 @@ type node struct {
 
 	// Enable batch mode for read-write transaction, instead of update mode
 	batchMode bool
+
+	// Debug mode
+	debug bool
 }
 
 // From returns a new Storm Node with a new bucket root below the current.

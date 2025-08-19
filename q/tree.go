@@ -10,7 +10,17 @@ import (
 type Matcher interface {
 	// Match is used to test the criteria against a structure.
 	Match(any) (bool, error)
+}
+
+// set field name
+type MatherSet interface {
+	SetField(field string)
 	GetField() string
+}
+
+// foreach all masther
+type MatherSetter interface {
+	Foreach(func(MatherSet))
 }
 
 // A ValueMatcher is used to test against a reflect.Value.
@@ -48,12 +58,22 @@ type or struct {
 }
 
 func (c *or) Match(i any) (bool, error) {
-	v := reflect.Indirect(reflect.ValueOf(i))
-	return c.MatchValue(&v)
+	return c.MatchValue(i)
 }
 
-func (*or) GetField() string {
-	return ""
+//	func (c *or) GetField() string {
+//		var list []string
+//		for _, child := range c.children {
+//			list = append(list, child.GetField())
+//		}
+//		return strings.Join(list, "|")
+//	}
+func (c *or) Foreach(fn func(MatherSet)) {
+	for _, matcher := range c.children {
+		if vm, ok := matcher.(MatherSet); ok {
+			fn(vm)
+		}
+	}
 }
 
 func (c *or) MatchValue(v any) (bool, error) {
@@ -85,8 +105,20 @@ type and struct {
 	children []Matcher
 }
 
-func (*and) GetField() string {
-	return ""
+// func (c *and) GetField() string {
+// 	var list []string
+// 	for _, child := range c.children {
+// 		list = append(list, child.GetField())
+// 	}
+// 	return strings.Join(list, "|")
+// }
+
+func (c *and) Foreach(fn func(MatherSet)) {
+	for _, matcher := range c.children {
+		if vm, ok := matcher.(MatherSet); ok {
+			fn(vm)
+		}
+	}
 }
 
 func (c *and) Match(i any) (bool, error) {
@@ -161,15 +193,27 @@ type not struct {
 }
 
 func (n *not) Match(i any) (bool, error) {
-	v := reflect.Indirect(reflect.ValueOf(i))
-	return n.MatchValue(&v)
+	// v := reflect.Indirect(reflect.ValueOf(i))
+	return n.MatchValue(i)
 }
 
-func (*not) GetField() string {
-	return ""
+// func (n *not) GetField() string {
+// 	var list []string
+// 	for _, child := range n.children {
+// 		list = append(list, child.GetField())
+// 	}
+// 	return strings.Join(list, "|")
+// }
+
+func (c *not) Foreach(fn func(MatherSet)) {
+	for _, matcher := range c.children {
+		if vm, ok := matcher.(MatherSet); ok {
+			fn(vm)
+		}
+	}
 }
 
-func (n *not) MatchValue(v *reflect.Value) (bool, error) {
+func (n *not) MatchValue(v any) (bool, error) {
 	var err error
 
 	for _, matcher := range n.children {
@@ -177,7 +221,7 @@ func (n *not) MatchValue(v *reflect.Value) (bool, error) {
 		if ok {
 			ok, err = vm.MatchValue(v)
 		} else {
-			ok, err = matcher.Match(v.Interface())
+			ok, err = matcher.Match(v)
 		}
 		if err != nil {
 			return false, err

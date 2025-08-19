@@ -184,41 +184,54 @@ func (q *query) runQuery(sink sink) error {
 	})
 }
 
-func (q *query) query(tx *bolt.Tx, sink sink) error {
-	bucketName := q.bucket
+func (qr *query) query(tx *bolt.Tx, sink sink) error {
+	bucketName := qr.bucket
 	if bucketName == "" {
 		bucketName = sink.bucketName()
 	}
-	bucket := q.node.GetBucket(tx, bucketName)
+	bucket := qr.node.GetBucket(tx, bucketName)
 
-	if q.limit == 0 {
+	if qr.limit == 0 {
 		return sink.flush()
 	}
-
-	sorter := newSorter(q.node, sink)
-	sorter.orderBy = q.orderBy
-	sorter.reverse = q.reverse
-	sorter.skip = q.skip
-	sorter.limit = q.limit
+	if rs, ok := sink.(reflectSink); ok && qr.tree != nil {
+		vs := rs.elem()
+		sc, err := extract(&vs)
+		if err != nil {
+			return fmt.Errorf("query struct error: %v", err)
+		}
+		if seter, ok := qr.tree.(q.MatherSetter); ok {
+			seter.Foreach(func(m q.MatherSet) {
+				// fmt.Println(m.GetField())
+				if fv, ok := sc.Fields[m.GetField()]; ok {
+					m.SetField(fv.JsonFieldName)
+				}
+			})
+		}
+		// utils.PrintAny(sc)
+	}
+	sorter := newSorter(qr.node, sink)
+	sorter.orderBy = qr.orderBy
+	sorter.reverse = qr.reverse
+	sorter.skip = qr.skip
+	sorter.limit = qr.limit
 	if bucket != nil {
-		c := internal.Cursor{C: bucket.Cursor(), Reverse: q.reverse}
-		rt := utils.NewExecTime()
-		rt.Start()
-		// vt := utils.NewExecTime()
-		idx := 0
+		var rt *utils.ExecTime
+		var idx int64
+		c := internal.Cursor{C: bucket.Cursor(), Reverse: qr.reverse}
+		if qr.node.debug {
+			rt = utils.NewExecTime()
+			rt.Start()
+		}
+
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			idx++
 			if v == nil {
 				continue
 			}
 
-			// if q.skip > 0 {
-			// 	q.skip--
-			// 	continue
-			// }
-			// vt.Start()
-			stop, err := sorter.filter(q.tree, bucket, k, v)
-			// fmt.Println("evey ", vt.End(false))
+			stop, err := sorter.filter(qr.tree, bucket, k, v)
+
 			if err != nil {
 				return err
 			}
@@ -226,7 +239,9 @@ func (q *query) query(tx *bolt.Tx, sink sink) error {
 				break
 			}
 		}
-		fmt.Println("query time:", rt.End(false), idx)
+		if qr.node.debug {
+			fmt.Println("query time:", rt.End(false), idx)
+		}
 	}
 
 	return sorter.flush()

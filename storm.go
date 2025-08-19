@@ -38,6 +38,7 @@ func Open(path string, stormOptions ...func(*Options) error) (*DB, error) {
 		codec:      opts.codec,
 		batchMode:  opts.batchMode,
 		rootBucket: opts.rootBucket,
+		debug:      opts.debug,
 	}
 
 	if n.codec == nil {
