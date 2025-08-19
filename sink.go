@@ -615,7 +615,7 @@ func (e *eachSink) bucketName() string {
 }
 
 func (e *eachSink) add(i *item) error {
-	return e.execFn(i.value.Interface())
+	return e.execFn(i.v)
 }
 
 func (e *eachSink) flush() error {
