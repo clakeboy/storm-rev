@@ -194,6 +194,10 @@ func (qr *query) query(tx *bolt.Tx, sink sink) error {
 	if qr.limit == 0 {
 		return sink.flush()
 	}
+
+	// find query field in index
+
+	// convert struct field name to json field name
 	if rs, ok := sink.(reflectSink); ok && qr.tree != nil {
 		vs := rs.elem()
 		sc, err := extract(&vs)

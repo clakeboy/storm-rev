@@ -282,7 +282,20 @@ func (s *sorter) Less(i, j int) bool {
 	}
 
 	if ssink, ok := s.sink.(sliceSink); ok {
-		return s.less(reflect.ValueOf(ssink.slice()[i]), reflect.ValueOf(ssink.slice()[j]))
+		if rsink, ok := s.sink.(reflectSink); ok {
+			leftElem := rsink.elem()
+			rightElem := rsink.elem()
+			err := s.node.Codec().Unmarshal(ssink.slice()[i].([]byte), leftElem.Interface())
+			if err != nil {
+				return false
+			}
+			err = s.node.Codec().Unmarshal(ssink.slice()[j].([]byte), rightElem.Interface())
+			if err != nil {
+				return false
+			}
+			return s.less(leftElem, rightElem)
+		}
+		// return s.less(reflect.ValueOf(ssink.slice()[i]), reflect.ValueOf(ssink.slice()[j]))
 	}
 	return s.less(*s.list[i].value, *s.list[j].value)
 }
