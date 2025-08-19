@@ -108,7 +108,7 @@ func extractField(value *reflect.Value, field *reflect.StructField, m *structCon
 			IsInteger:      isInteger(value),
 			Value:          value,
 			IncrementStart: 1,
-			JsonFieldName:  field.Tag.Get("json"),
+			JsonFieldName:  strings.Split(field.Tag.Get("json"), ",")[0],
 		}
 
 		tags := strings.Split(tag, ",")
@@ -173,7 +173,7 @@ func extractField(value *reflect.Value, field *reflect.StructField, m *structCon
 				IsID:           true,
 				Value:          value,
 				IncrementStart: 1,
-				JsonFieldName:  field.Tag.Get("json"),
+				JsonFieldName:  strings.Split(field.Tag.Get("json"), ",")[0],
 			}
 			m.Fields[field.Name] = f
 		}
@@ -182,7 +182,7 @@ func extractField(value *reflect.Value, field *reflect.StructField, m *structCon
 	if _, ok := m.Fields[field.Name]; !ok {
 		f = &fieldConfig{
 			Name:          field.Name,
-			JsonFieldName: field.Tag.Get("json"),
+			JsonFieldName: strings.Split(field.Tag.Get("json"), ",")[0],
 		}
 		m.Fields[field.Name] = f
 	}
