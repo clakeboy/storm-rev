@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"go/token"
 	"reflect"
-	"strings"
 
 	"github.com/tidwall/gjson"
 )
@@ -40,7 +39,7 @@ func (r fieldMatcherDelegate) MatchValue(v any) (bool, error) {
 	// if !field.IsValid() {
 	// 	return false, ErrUnknownField
 	// }
-	res := gjson.GetBytes(v.([]byte), strings.ToLower(r.Field))
+	res := gjson.GetBytes(v.([]byte), r.Field)
 	if !res.Exists() {
 		return false, ErrUnknownField
 	}

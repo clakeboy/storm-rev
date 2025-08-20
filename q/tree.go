@@ -13,14 +13,14 @@ type Matcher interface {
 }
 
 // set field name
-type MatherSet interface {
+type MatherSetter interface {
 	SetField(field string)
 	GetField() string
 }
 
 // foreach all masther
-type MatherSetter interface {
-	Foreach(func(MatherSet))
+type MatherEach interface {
+	Foreach(func(MatherSetter))
 }
 
 // A ValueMatcher is used to test against a reflect.Value.
@@ -68,9 +68,9 @@ func (c *or) Match(i any) (bool, error) {
 //		}
 //		return strings.Join(list, "|")
 //	}
-func (c *or) Foreach(fn func(MatherSet)) {
+func (c *or) Foreach(fn func(MatherSetter)) {
 	for _, matcher := range c.children {
-		if vm, ok := matcher.(MatherSet); ok {
+		if vm, ok := matcher.(MatherSetter); ok {
 			fn(vm)
 		}
 	}
@@ -113,9 +113,9 @@ type and struct {
 // 	return strings.Join(list, "|")
 // }
 
-func (c *and) Foreach(fn func(MatherSet)) {
+func (c *and) Foreach(fn func(MatherSetter)) {
 	for _, matcher := range c.children {
-		if vm, ok := matcher.(MatherSet); ok {
+		if vm, ok := matcher.(MatherSetter); ok {
 			fn(vm)
 		}
 	}
@@ -205,9 +205,9 @@ func (n *not) Match(i any) (bool, error) {
 // 	return strings.Join(list, "|")
 // }
 
-func (c *not) Foreach(fn func(MatherSet)) {
+func (c *not) Foreach(fn func(MatherSetter)) {
 	for _, matcher := range c.children {
-		if vm, ok := matcher.(MatherSet); ok {
+		if vm, ok := matcher.(MatherSetter); ok {
 			fn(vm)
 		}
 	}

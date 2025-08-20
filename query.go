@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/clakeboy/golib/utils"
+	"github.com/clakeboy/storm-rev/index"
 	"github.com/clakeboy/storm-rev/internal"
 	"github.com/clakeboy/storm-rev/q"
 	bolt "go.etcd.io/bbolt"
@@ -197,6 +198,8 @@ func (qr *query) query(tx *bolt.Tx, sink sink) error {
 
 	// find query field in index
 
+	// hasIndex := false
+
 	// convert struct field name to json field name
 	if rs, ok := sink.(reflectSink); ok && qr.tree != nil {
 		vs := rs.elem()
@@ -204,14 +207,21 @@ func (qr *query) query(tx *bolt.Tx, sink sink) error {
 		if err != nil {
 			return fmt.Errorf("query struct error: %v", err)
 		}
-		if seter, ok := qr.tree.(q.MatherSetter); ok {
-			seter.Foreach(func(m q.MatherSet) {
+		if seter, ok := qr.tree.(q.MatherEach); ok {
+			seter.Foreach(func(m q.MatherSetter) {
 				// fmt.Println(m.GetField())
 				if fv, ok := sc.Fields[m.GetField()]; ok {
 					m.SetField(fv.JsonFieldName)
 				}
 			})
 		}
+
+		if seter, ok := qr.tree.(q.MatherSetter); ok {
+			if fv, ok := sc.Fields[seter.GetField()]; ok {
+				seter.SetField(fv.JsonFieldName)
+			}
+		}
+
 		// utils.PrintAny(sc)
 	}
 	sorter := newSorter(qr.node, sink)
@@ -249,4 +259,8 @@ func (qr *query) query(tx *bolt.Tx, sink sink) error {
 	}
 
 	return sorter.flush()
+}
+
+func (qr *query) queryIndex(bucket *bolt.Bucket, scfg *structConfig, sink *listSink, opts *index.Options) {
+
 }
