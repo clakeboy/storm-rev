@@ -1,7 +1,6 @@
 package storm
 
 import (
-	"encoding/json"
 	"reflect"
 	"sort"
 	"time"
@@ -399,7 +398,7 @@ func (l *listSink) flush() error {
 		for i, v := range l.results {
 			if l.isPtr {
 				pr := l.elem()
-				json.Unmarshal(v.([]byte), pr.Interface())
+				l.node.Codec().Unmarshal(v.([]byte), pr.Interface())
 				tmplist.Index(i).Set(pr)
 			} else {
 				tmplist.Index(i).Set(l.elem())
@@ -444,7 +443,9 @@ func (f *firstSink) bucketName() string {
 }
 
 func (f *firstSink) add(i *item) error {
-	reflect.Indirect(f.ref).Set(i.value.Elem())
+	f.node.Codec().Unmarshal(i.v, f.ref.Interface())
+	// json.Unmarshal(i.v, f.ref.Interface())
+	// reflect.Indirect(f.ref).Set(i.value.Elem())
 	f.found = true
 	return nil
 }
