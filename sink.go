@@ -603,7 +603,7 @@ func (r *rawSink) readOnly() bool {
 	return true
 }
 
-func newEachSink(to interface{}) (*eachSink, error) {
+func newEachSink(node Node, to interface{}) (*eachSink, error) {
 	ref := reflect.ValueOf(to)
 
 	if !ref.IsValid() || ref.Kind() != reflect.Ptr || ref.Elem().Kind() != reflect.Struct {
@@ -611,11 +611,13 @@ func newEachSink(to interface{}) (*eachSink, error) {
 	}
 
 	return &eachSink{
-		ref: ref,
+		ref:  ref,
+		node: node,
 	}, nil
 }
 
 type eachSink struct {
+	node   Node
 	ref    reflect.Value
 	execFn func(interface{}) error
 }
@@ -629,7 +631,9 @@ func (e *eachSink) bucketName() string {
 }
 
 func (e *eachSink) add(i *item) error {
-	return e.execFn(i.v)
+	value := e.elem()
+	e.node.Codec().Unmarshal(i.v, value.Interface())
+	return e.execFn(value.Interface())
 }
 
 func (e *eachSink) flush() error {

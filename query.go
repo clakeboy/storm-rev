@@ -161,7 +161,7 @@ func (q *query) RawEach(fn func([]byte, []byte) error) error {
 }
 
 func (q *query) Each(kind any, fn func(any) error) error {
-	sink, err := newEachSink(kind)
+	sink, err := newEachSink(q.node, kind)
 	if err != nil {
 		return err
 	}
