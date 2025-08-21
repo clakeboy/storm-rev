@@ -41,7 +41,7 @@ func (r fieldMatcherDelegate) MatchValue(v any) (bool, error) {
 	// }
 	res := gjson.GetBytes(v.([]byte), r.Field)
 	if !res.Exists() {
-		return false, ErrUnknownField
+		return false, nil
 	}
 	var val any
 	switch res.Type {

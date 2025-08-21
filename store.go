@@ -115,7 +115,11 @@ func (n *node) reIndex(tx *bolt.Tx, data any, cfg *structConfig) error {
 	}
 
 	err := root.Select(q.True()).Each(data, func(i any) error {
-		return root.Update(i)
+		ref := reflect.New(reflect.TypeOf(data).Elem())
+		n.codec.Unmarshal(i.([]byte), ref.Interface())
+		// ref := reflect.TypeOf(data).Elem()
+		// utils.PrintAny(ref.Interface())
+		return root.Update(ref.Interface())
 	})
 	if err != nil {
 		return err
@@ -248,7 +252,7 @@ func (n *node) save(tx *bolt.Tx, cfg *structConfig, data any, update bool) error
 func (n *node) Update(data any) error {
 	return n.update(data, func(ref *reflect.Value, current *reflect.Value, cfg *structConfig) error {
 		numfield := ref.NumField()
-		for i := 0; i < numfield; i++ {
+		for i := range numfield {
 			f := ref.Field(i)
 			if ref.Type().Field(i).PkgPath != "" {
 				continue

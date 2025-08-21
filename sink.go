@@ -631,9 +631,9 @@ func (e *eachSink) bucketName() string {
 }
 
 func (e *eachSink) add(i *item) error {
-	value := e.elem()
-	e.node.Codec().Unmarshal(i.v, value.Interface())
-	return e.execFn(value.Interface())
+	// value := e.elem()
+	// e.node.Codec().Unmarshal(i.v, value.Interface())
+	return e.execFn(i.v)
 }
 
 func (e *eachSink) flush() error {
