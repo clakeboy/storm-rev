@@ -72,6 +72,8 @@ func (c *or) Foreach(fn func(MatherSetter)) {
 	for _, matcher := range c.children {
 		if vm, ok := matcher.(MatherSetter); ok {
 			fn(vm)
+		} else if vm, ok := matcher.(MatherEach); ok {
+			vm.Foreach(fn)
 		}
 	}
 }
@@ -117,6 +119,8 @@ func (c *and) Foreach(fn func(MatherSetter)) {
 	for _, matcher := range c.children {
 		if vm, ok := matcher.(MatherSetter); ok {
 			fn(vm)
+		} else if vm, ok := matcher.(MatherEach); ok {
+			vm.Foreach(fn)
 		}
 	}
 }
@@ -209,6 +213,8 @@ func (c *not) Foreach(fn func(MatherSetter)) {
 	for _, matcher := range c.children {
 		if vm, ok := matcher.(MatherSetter); ok {
 			fn(vm)
+		} else if vm, ok := matcher.(MatherEach); ok {
+			vm.Foreach(fn)
 		}
 	}
 }
