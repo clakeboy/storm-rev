@@ -6,6 +6,7 @@ import (
 
 	"github.com/clakeboy/storm-rev/index"
 	"github.com/clakeboy/storm-rev/q"
+	"github.com/tidwall/gjson"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -32,6 +33,9 @@ type TypeStore interface {
 
 	// DeleteStruct deletes a structure from the associated bucket
 	DeleteStruct(data any) error
+
+	// ths new rebuild index function experiment
+	RebuildIndex(data any) error
 }
 
 // Init creates the indexes and buckets for a given structure
@@ -416,4 +420,96 @@ func (n *node) deleteStruct(tx *bolt.Tx, cfg *structConfig, id []byte) error {
 	}
 
 	return bucket.Delete(id)
+}
+
+// 重建搜引用结构
+type idxCfg struct {
+	idx index.Index
+	cfg *fieldConfig
+}
+
+// 实验性重建索引方法
+func (n *node) RebuildIndex(data any) error {
+	ref := reflect.ValueOf(data)
+
+	if !ref.IsValid() || ref.Kind() != reflect.Ptr || ref.Elem().Kind() != reflect.Struct {
+		return ErrStructPtrNeeded
+	}
+
+	cfg, err := extract(&ref)
+	if err != nil {
+		return err
+	}
+	n.WithBatch(true)
+	return n.readWriteTx(func(tx *bolt.Tx) error {
+		root := n.WithTransaction(tx)
+		nodes := root.From(cfg.Name).PrefixScan(indexPrefix)
+		bucket := root.GetBucket(tx, cfg.Name)
+		if bucket == nil {
+			return ErrNotFound
+		}
+		//先删除原有索引
+		for _, node := range nodes {
+			buckets := node.Bucket()
+			name := buckets[len(buckets)-1]
+			err := bucket.DeleteBucket([]byte(name))
+			if err != nil {
+				return err
+			}
+		}
+
+		var indexMap []*idxCfg
+
+		for fieldName, fieldCfg := range cfg.Fields {
+			if fieldCfg.Index == "" {
+				continue
+			}
+
+			//创建新索引
+			idx, err := getIndex(bucket, fieldCfg.Index, fieldName)
+			if err != nil {
+				return err
+			}
+			indexMap = append(indexMap, &idxCfg{
+				idx: idx,
+				cfg: fieldCfg,
+			})
+		}
+
+		err := root.Select().Bucket(cfg.Name).RawEach(func(k, v []byte) error {
+			for _, idx := range indexMap {
+				res := gjson.GetBytes(v, idx.cfg.JsonFieldName)
+				if !res.Exists() {
+					return err
+				}
+				// idx.cfg.Value.Set(reflect.ValueOf(res.Value()))
+				// var value any
+				switch idx.cfg.Value.Kind() {
+				case reflect.Float32, reflect.Float64:
+					idx.cfg.Value.SetFloat(res.Float())
+				case reflect.Int, reflect.Uint, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+					idx.cfg.Value.SetInt(res.Int())
+				default:
+					idx.cfg.Value.SetString(res.String())
+					// idx.cfg.Value.set
+					// value = res.Value()
+				}
+				bval, err := toBytes(idx.cfg.Value.Interface(), n.codec)
+				if err != nil {
+					return err
+				}
+				err = idx.idx.Add(bval, k)
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+
+		if err != nil {
+			return err
+		}
+
+		return nil
+	})
 }

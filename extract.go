@@ -224,6 +224,11 @@ func getIndex(bucket *bolt.Bucket, idxKind string, fieldName string) (index.Inde
 	return idx, err
 }
 
+// delete existing index
+func deleteIndex(bucket *bolt.Bucket, fieldName string) error {
+	return bucket.DeleteBucket([]byte(indexPrefix + fieldName))
+}
+
 func isZero(v *reflect.Value) bool {
 	zero := reflect.Zero(v.Type()).Interface()
 	current := v.Interface()
