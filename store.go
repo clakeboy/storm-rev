@@ -459,8 +459,11 @@ func (n *node) RebuildIndex(data any) error {
 		}
 
 		var indexMap []*idxCfg
-
+		var idField *fieldConfig
 		for fieldName, fieldCfg := range cfg.Fields {
+			if fieldCfg.IsID {
+				idField = fieldCfg
+			}
 			if fieldCfg.Index == "" {
 				continue
 			}
@@ -475,8 +478,9 @@ func (n *node) RebuildIndex(data any) error {
 				cfg: fieldCfg,
 			})
 		}
-
+		var lastId []byte
 		err := root.Select().Bucket(cfg.Name).RawEach(func(k, v []byte) error {
+			lastId = k
 			for _, idx := range indexMap {
 				res := gjson.GetBytes(v, idx.cfg.JsonFieldName)
 				if !res.Exists() {
@@ -505,6 +509,14 @@ func (n *node) RebuildIndex(data any) error {
 			}
 			return nil
 		})
+
+		if idField != nil && idField.Increment {
+			meta, err := newMeta(bucket, root)
+			if err != nil {
+				return err
+			}
+			meta.setIncrement(idField, lastId)
+		}
 
 		if err != nil {
 			return err

@@ -67,3 +67,15 @@ func (m *meta) increment(field *fieldConfig) error {
 	field.IsZero = false
 	return nil
 }
+
+func (m *meta) setIncrement(field *fieldConfig, counter []byte) error {
+	// raw, err := numbertob(counter)
+	// if err != nil {
+	// 	return err
+	// }
+	err := m.bucket.Put([]byte(field.Name+"counter"), counter)
+	if err != nil {
+		return err
+	}
+	return nil
+}
