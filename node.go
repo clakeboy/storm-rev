@@ -61,6 +61,18 @@ type node struct {
 
 	// Debug mode
 	debug bool
+
+	// Index definitions changed inside an open transaction and must be rebuilt after commit.
+	txIndexDirty map[string]*structConfig
+
+	// Index tables dropped inside an open transaction and removed after commit.
+	txIndexDrops map[string]bool
+
+	// Records saved inside an open transaction and indexed in batches after commit.
+	txIndexRecords map[string][]*savedRecord
+
+	// Records deleted inside an open transaction and removed from indexes after commit.
+	txIndexDeletes map[string][]*deletedRecord
 }
 
 // From returns a new Storm Node with a new bucket root below the current.

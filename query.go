@@ -4,13 +4,12 @@ import (
 	"fmt"
 
 	"github.com/clakeboy/golib/utils"
-	"github.com/clakeboy/storm-rev/index"
 	"github.com/clakeboy/storm-rev/internal"
 	"github.com/clakeboy/storm-rev/q"
 	bolt "go.etcd.io/bbolt"
 )
 
-// Select a list of records that match a list of matchers. Doesn't use indexes.
+// Select a list of records that match a list of matchers.
 func (n *node) Select(matchers ...q.Matcher) Query {
 	tree := q.And(matchers...)
 	return newQuery(n, tree)
@@ -196,17 +195,20 @@ func (qr *query) query(tx *bolt.Tx, sink sink) error {
 		return sink.flush()
 	}
 
-	// find query field in index
+	var plan *selectIndexPlan
 
-	// hasIndex := false
-
-	// convert struct field name to json field name
+	// Plan indexes against struct field names before matchers are rewritten for raw JSON filtering.
 	if rs, ok := sink.(reflectSink); ok && qr.tree != nil {
 		vs := rs.elem()
 		sc, err := extract(&vs)
 		if err != nil {
 			return fmt.Errorf("query struct error: %v", err)
 		}
+		if bucket != nil && bucketName == sc.Name {
+			plan, _ = qr.selectIndexPlan(sc)
+		}
+
+		// convert struct field name to json field name
 		if seter, ok := qr.tree.(q.MatherEach); ok {
 			seter.Foreach(func(m q.MatherSetter) {
 				// fmt.Println(m.GetField())
@@ -238,6 +240,19 @@ func (qr *query) query(tx *bolt.Tx, sink sink) error {
 			rt.Start()
 		}
 
+		if plan != nil {
+			used, scanned, err := qr.runSelectIndexPlan(bucket, sorter, plan)
+			if err != nil {
+				return err
+			}
+			if used {
+				if qr.node.debug {
+					fmt.Println("query time:", rt.End(false), scanned)
+				}
+				return sorter.flush()
+			}
+		}
+
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			idx++
 			if v == nil {
@@ -259,8 +274,4 @@ func (qr *query) query(tx *bolt.Tx, sink sink) error {
 	}
 
 	return sorter.flush()
-}
-
-func (qr *query) queryIndex(bucket *bolt.Bucket, scfg *structConfig, sink *listSink, opts *index.Options) {
-
 }

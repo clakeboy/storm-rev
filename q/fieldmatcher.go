@@ -35,28 +35,38 @@ func (r fieldMatcherDelegate) Match(i any) (bool, error) {
 }
 
 func (r fieldMatcherDelegate) MatchValue(v any) (bool, error) {
-	// field := v.FieldByName(r.Field)
-	// if !field.IsValid() {
-	// 	return false, ErrUnknownField
-	// }
-	res := gjson.GetBytes(v.([]byte), r.Field)
-	if !res.Exists() {
-		return false, nil
+	// Query scans pass raw JSON bytes, while q package tests and direct callers
+	// may pass a struct. Support both forms without panicking on type assertions.
+	if raw, ok := v.([]byte); ok {
+		res := gjson.GetBytes(raw, r.Field)
+		if !res.Exists() {
+			return false, nil
+		}
+		var val any
+		switch res.Type {
+		case gjson.String:
+			val = res.Str
+		case gjson.Number:
+			val = res.Num
+		case gjson.True:
+			val = true
+		case gjson.False:
+			val = false
+		case gjson.JSON:
+			val = []byte(res.Raw)
+		}
+		return r.MatchField(val)
 	}
-	var val any
-	switch res.Type {
-	case gjson.String:
-		val = res.Str
-	case gjson.Number:
-		val = res.Num
-	case gjson.True:
-		val = true
-	case gjson.False:
-		val = false
-	case gjson.JSON:
-		val = res.Raw
+
+	value := reflect.Indirect(reflect.ValueOf(v))
+	if !value.IsValid() {
+		return false, ErrUnknownField
 	}
-	return r.MatchField(val)
+	field := value.FieldByName(r.Field)
+	if !field.IsValid() {
+		return false, ErrUnknownField
+	}
+	return r.MatchField(field.Interface())
 }
 
 func (r fieldMatcherDelegate) GetField() string {

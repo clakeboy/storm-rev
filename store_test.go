@@ -2,6 +2,7 @@ package storm
 
 import (
 	"fmt"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -79,11 +80,11 @@ func TestReIndex(t *testing.T) {
 	db.Bolt.View(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte("User"))
 		require.NotNil(t, bucket)
-
-		require.NotNil(t, bucket.Bucket([]byte(indexPrefix+"Name")))
-		require.NotNil(t, bucket.Bucket([]byte(indexPrefix+"Age")))
+		require.Nil(t, bucket.Bucket([]byte(indexPrefix+"Name")))
+		require.Nil(t, bucket.Bucket([]byte(indexPrefix+"Age")))
 		return nil
 	})
+	require.DirExists(t, filepath.Join(indexRootDir(db.Bolt.Path()), safeIndexName("User")+bleveIndexSuffix))
 
 	type User struct {
 		ID    int
@@ -97,12 +98,12 @@ func TestReIndex(t *testing.T) {
 	db.Bolt.View(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte("User"))
 		require.NotNil(t, bucket)
-
-		require.NotNil(t, bucket.Bucket([]byte(indexPrefix+"Name")))
 		require.Nil(t, bucket.Bucket([]byte(indexPrefix+"Age")))
-		require.NotNil(t, bucket.Bucket([]byte(indexPrefix+"Group")))
+		require.Nil(t, bucket.Bucket([]byte(indexPrefix+"Name")))
+		require.Nil(t, bucket.Bucket([]byte(indexPrefix+"Group")))
 		return nil
 	})
+	require.DirExists(t, filepath.Join(indexRootDir(db.Bolt.Path()), safeIndexName("User")+bleveIndexSuffix))
 }
 
 func TestSave(t *testing.T) {
@@ -179,21 +180,10 @@ func TestSaveUnique(t *testing.T) {
 	err = db.Save(&u3)
 	require.NoError(t, err)
 
-	db.Bolt.View(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket([]byte("UniqueNameUser"))
-
-		uniqueBucket := bucket.Bucket([]byte(indexPrefix + "Name"))
-		require.NotNil(t, uniqueBucket)
-
-		id := uniqueBucket.Get([]byte("Jake"))
-		i, err := toBytes(10, json.Codec)
-		require.NoError(t, err)
-		require.Equal(t, i, id)
-
-		id = uniqueBucket.Get([]byte("John"))
-		require.Nil(t, id)
-		return nil
-	})
+	var found UniqueNameUser
+	require.NoError(t, db.One("Name", "Jake", &found))
+	require.Equal(t, 10, found.ID)
+	require.Equal(t, ErrNotFound, db.One("Name", "John", &found))
 }
 
 func TestSaveUniqueStruct(t *testing.T) {
@@ -341,6 +331,134 @@ func TestSaveIncrement(t *testing.T) {
 		require.Len(t, list, 1)
 		require.Equal(t, s1, list[0])
 	}
+}
+
+func TestSaveAll(t *testing.T) {
+	db, cleanup := createDB(t)
+	defer cleanup()
+
+	users := []SimpleUser{
+		{ID: 1, Name: "John"},
+		{ID: 2, Name: "Jane"},
+	}
+	require.NoError(t, db.SaveAll(users))
+
+	moreUsers := []*SimpleUser{
+		{ID: 3, Name: "Jake"},
+		{ID: 4, Name: "Jill"},
+	}
+	require.NoError(t, db.SaveAll(moreUsers))
+	require.NoError(t, db.SaveAll([]SimpleUser{}))
+
+	var all []SimpleUser
+	require.NoError(t, db.All(&all))
+	require.Len(t, all, 4)
+
+	var found SimpleUser
+	require.NoError(t, db.One("ID", 3, &found))
+	require.Equal(t, "Jake", found.Name)
+
+	require.Equal(t, ErrSlicePtrNeeded, db.SaveAll(nil))
+	require.Equal(t, ErrSlicePtrNeeded, db.SaveAll(10))
+
+	var nilUsers []SimpleUser
+	require.Equal(t, ErrSlicePtrNeeded, db.SaveAll(nilUsers))
+	require.Equal(t, ErrStructPtrNeeded, db.SaveAll([]int{1}))
+	require.Equal(t, ErrStructPtrNeeded, db.SaveAll([]*SimpleUser{nil}))
+	require.Equal(t, ErrZeroID, db.SaveAll([]SimpleUser{{Name: "missing id"}}))
+}
+
+func TestSaveAllIncrement(t *testing.T) {
+	db, cleanup := createDB(t)
+	defer cleanup()
+
+	type User struct {
+		ID   int    `storm:"id,increment"`
+		Name string `storm:"index"`
+		Age  int    `storm:"index,increment"`
+	}
+
+	users := []User{
+		{Name: "John"},
+		{Name: "Jane"},
+	}
+	require.NoError(t, db.SaveAll(users))
+	require.Equal(t, 1, users[0].ID)
+	require.Equal(t, 2, users[1].ID)
+	require.Equal(t, 1, users[0].Age)
+	require.Equal(t, 2, users[1].Age)
+
+	var byAge []User
+	require.NoError(t, db.Find("Age", 2, &byAge))
+	require.Len(t, byAge, 1)
+	require.Equal(t, users[1], byAge[0])
+}
+
+func TestSaveAllUnique(t *testing.T) {
+	db, cleanup := createDB(t)
+	defer cleanup()
+
+	require.NoError(t, db.Save(&UniqueNameUser{ID: 1, Name: "taken"}))
+	require.Equal(t, ErrAlreadyExists, db.SaveAll([]UniqueNameUser{{ID: 2, Name: "taken"}}))
+
+	var missing UniqueNameUser
+	require.Equal(t, ErrNotFound, db.One("ID", 2, &missing))
+
+	err := db.SaveAll([]UniqueNameUser{
+		{ID: 2, Name: "same"},
+		{ID: 3, Name: "same"},
+	})
+	require.Equal(t, ErrAlreadyExists, err)
+	require.Equal(t, ErrNotFound, db.One("ID", 2, &missing))
+
+	err = db.SaveAll([]UniqueNameUser{
+		{ID: 1, Name: "free"},
+		{ID: 2, Name: "taken"},
+	})
+	require.NoError(t, err)
+
+	var found UniqueNameUser
+	require.NoError(t, db.One("Name", "free", &found))
+	require.Equal(t, 1, found.ID)
+	require.NoError(t, db.One("Name", "taken", &found))
+	require.Equal(t, 2, found.ID)
+}
+
+func TestSaveAllIndexes(t *testing.T) {
+	db, cleanup := createDB(t)
+	defer cleanup()
+
+	type Article struct {
+		ID    int    `storm:"id"`
+		Group string `storm:"index,composite=group_age:1"`
+		Age   int    `storm:"index,composite=group_age:2"`
+		Slug  string `storm:"unique"`
+		Body  string `storm:"fulltext"`
+	}
+
+	articles := []Article{
+		{ID: 1, Group: "staff", Age: 20, Slug: "one", Body: "storm supports batch save"},
+		{ID: 2, Group: "staff", Age: 30, Slug: "two", Body: "bleve indexes batch records"},
+		{ID: 3, Group: "admin", Age: 20, Slug: "three", Body: "exact indexes stay available"},
+	}
+	require.NoError(t, db.SaveAll(articles))
+
+	var byGroup []Article
+	require.NoError(t, db.Find("Group", "staff", &byGroup))
+	require.Len(t, byGroup, 2)
+
+	var byComposite []Article
+	require.NoError(t, db.FindByIndex("group_age", []any{"staff", 20}, &byComposite))
+	require.Len(t, byComposite, 1)
+	require.Equal(t, 1, byComposite[0].ID)
+
+	var bySlug Article
+	require.NoError(t, db.One("Slug", "two", &bySlug))
+	require.Equal(t, 2, bySlug.ID)
+
+	var byText []Article
+	require.NoError(t, db.Search("Body", "batch", &byText))
+	require.Len(t, byText, 2)
 }
 
 func TestSaveDifferentBucketRoot(t *testing.T) {

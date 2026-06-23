@@ -1,11 +1,12 @@
 # MStorm
 
-[![GoDoc](https://godoc.org/github.com/clake/mstorm?status.svg)](https://godoc.org/github.com/clake/mstorm)
+[![Go Reference](https://pkg.go.dev/badge/github.com/clakeboy/storm-rev.svg)](https://pkg.go.dev/github.com/clakeboy/storm-rev)
 
 This project is a fork of [storm](https://github.com/asdine/storm), which is a simple and powerful toolkit for BoltDB.
 
+Chinese documentation: [README.zh-CN.md](README.zh-CN.md).
 
-Storm is a simple and powerful toolkit for [BoltDB](https://github.com/coreos/bbolt). Basically, Storm provides indexes, a wide range of methods to store and fetch data, an advanced query system, and much more.
+MStorm is a simple and powerful toolkit for [BoltDB](https://github.com/coreos/bbolt). It provides typed CRUD helpers, external [Bleve](https://github.com/blevesearch/bleve) indexes, composite indexes, full-text search, an advanced query system, and much more.
 
 In addition to the examples below, see also the [examples in the GoDoc](https://godoc.org/github.com/asdine/storm#pkg-examples).
 
@@ -29,12 +30,15 @@ _For extended queries and support for [Badger](https://github.com/dgraph-io/badg
       - [Fetch all objects sorted by index](#fetch-all-objects-sorted-by-index)
       - [Fetch a range of objects](#fetch-a-range-of-objects)
       - [Fetch objects by prefix](#fetch-objects-by-prefix)
+      - [Fetch objects by composite index](#fetch-objects-by-composite-index)
+      - [Full-text search](#full-text-search)
       - [Skip, Limit and Reverse](#skip-limit-and-reverse)
       - [Delete an object](#delete-an-object)
       - [Update an object](#update-an-object)
       - [Initialize buckets and indexes before saving an object](#initialize-buckets-and-indexes-before-saving-an-object)
       - [Drop a bucket](#drop-a-bucket)
       - [Re-index a bucket](#re-index-a-bucket)
+      - [Index files](#index-files)
     - [Advanced queries](#advanced-queries)
     - [Transactions](#transactions)
     - [Options](#options)
@@ -81,10 +85,11 @@ defer db.Close()
 ```go
 type User struct {
   ID int // primary key
-  Group string `storm:"index"` // this field will be indexed
-  Email string `storm:"unique"` // this field will be indexed with a unique constraint
+  Group string `storm:"index,composite=group_age:1"` // indexed and used as the first field of a composite index
+  Email string `storm:"unique"` // indexed with a unique constraint
   Name string // this field will not be indexed
-  Age int `storm:"index"`
+  Age int `storm:"index,composite=group_age:2"` // indexed and used as the second field of a composite index
+  Bio string `storm:"fulltext"` // indexed for full-text search
 }
 ```
 
@@ -115,6 +120,16 @@ type User struct {
 }
 ```
 
+Supported index tags:
+
+- `storm:"index"`: single-field exact/range/prefix index.
+- `storm:"unique"`: single-field index with a unique constraint.
+- `storm:"fulltext"`: full-text index for `Search`.
+- `storm:"composite=name:order"`: adds a field to a named composite index. Orders must start at `1` and be continuous.
+- `storm:"id"`: primary key. If omitted, a field named `ID` is used.
+- `storm:"increment"`: auto-increment integer field.
+- `storm:"inline"`: reads tags from an embedded struct.
+
 ### Save your object
 
 ```go
@@ -138,6 +153,17 @@ err = db.Save(&user)
 That's it.
 
 `Save` creates or updates all the required indexes and buckets, checks the unique constraints and saves the object to the store.
+
+Use `SaveAll` when importing many objects. It validates and writes the whole slice in one BoltDB write transaction, then updates the external indexes in batches.
+
+```go
+users := []User{
+  {ID: 1, Name: "John"},
+  {ID: 2, Name: "Jane"},
+}
+
+err := db.SaveAll(users)
+```
 
 #### Auto Increment
 
@@ -230,6 +256,37 @@ var users []User
 err := db.Prefix("Name", "Jo", &users)
 ```
 
+#### Fetch objects by composite index
+
+Composite indexes are declared with `composite=<index name>:<field order>` and queried with `FindByIndex`.
+The current composite index API supports full equality matches.
+
+```go
+type User struct {
+  ID    int
+  Group string `storm:"index,composite=group_age:1"`
+  Age   int    `storm:"index,composite=group_age:2"`
+}
+
+var users []User
+err := db.FindByIndex("group_age", []any{"staff", 21}, &users)
+```
+
+#### Full-text search
+
+Use `storm:"fulltext"` for fields that should be analyzed by Bleve and queried with `Search`.
+This is separate from `Find`, which keeps exact-match semantics.
+
+```go
+type Article struct {
+  ID    int
+  Title string `storm:"fulltext"`
+}
+
+var articles []Article
+err := db.Search("Title", "bleve search", &articles)
+```
+
 #### Skip, Limit and Reverse
 
 ```go
@@ -242,6 +299,7 @@ err = db.Find("Group", "staff", &users, storm.Limit(10), storm.Skip(10), storm.R
 err = db.All(&users, storm.Limit(10), storm.Skip(10), storm.Reverse())
 err = db.AllByIndex("CreatedAt", &users, storm.Limit(10), storm.Skip(10), storm.Reverse())
 err = db.Range("Age", 10, 21, &users, storm.Limit(10), storm.Skip(10), storm.Reverse())
+err = db.Search("Title", "bleve", &articles, storm.Limit(10), storm.Skip(10), storm.Reverse())
 ```
 
 #### Delete an object
@@ -290,7 +348,20 @@ err := db.Drop("User")
 err := db.ReIndex(&User{})
 ```
 
-Useful when the structure has changed
+Useful when the structure has changed or when external index files need to be rebuilt.
+`ReIndex` is the only public index rebuild method.
+
+#### Index files
+
+MStorm stores records in BoltDB and stores indexes as external Bleve indexes.
+If the Bolt database is `/path/app.db`, index files are stored under `/path/app_db_index/`.
+Each table gets its own Bleve index directory, for example `/path/app_db_index/User.bleve`.
+
+BoltDB remains the source of truth. If an external index becomes inconsistent, rebuild it with:
+
+```go
+err := db.ReIndex(&User{})
+```
 
 ### Advanced queries
 

@@ -106,6 +106,128 @@ func TestTransactionRollback(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestTransactionSaveAll(t *testing.T) {
+	db, cleanup := createDB(t)
+	defer cleanup()
+
+	tx, err := db.Begin(true)
+	require.NoError(t, err)
+
+	err = tx.SaveAll([]IndexedNameUser{
+		{ID: 1, Name: "John"},
+		{ID: 2, Name: "John"},
+	})
+	require.NoError(t, err)
+
+	var inTx []IndexedNameUser
+	err = tx.Find("Name", "John", &inTx)
+	require.NoError(t, err)
+	require.Len(t, inTx, 2)
+
+	require.NoError(t, tx.Commit())
+
+	var committed []IndexedNameUser
+	err = db.Find("Name", "John", &committed)
+	require.NoError(t, err)
+	require.Len(t, committed, 2)
+
+	tx, err = db.Begin(true)
+	require.NoError(t, err)
+	err = tx.SaveAll([]IndexedNameUser{{ID: 3, Name: "Rollback"}})
+	require.NoError(t, err)
+	require.NoError(t, tx.Rollback())
+
+	var rolledBack []IndexedNameUser
+	err = db.Find("Name", "Rollback", &rolledBack)
+	require.Equal(t, ErrNotFound, err)
+}
+
+func TestTransactionDeleteStructUsesIncrementalIndexDelete(t *testing.T) {
+	db, cleanup := createDB(t)
+	defer cleanup()
+
+	require.NoError(t, db.Save(&IndexedNameUser{ID: 1, Name: "John"}))
+	require.NoError(t, db.Save(&IndexedNameUser{ID: 2, Name: "John"}))
+
+	tx, err := db.Begin(true)
+	require.NoError(t, err)
+
+	err = tx.DeleteStruct(&IndexedNameUser{ID: 1})
+	require.NoError(t, err)
+
+	ntx := tx.(*node)
+	require.Empty(t, ntx.txIndexDirty)
+	require.Len(t, ntx.txIndexDeletes["IndexedNameUser"], 1)
+
+	require.NoError(t, tx.Commit())
+
+	var users []IndexedNameUser
+	err = db.Find("Name", "John", &users)
+	require.NoError(t, err)
+	require.Len(t, users, 1)
+	require.Equal(t, 2, users[0].ID)
+
+	var deleted IndexedNameUser
+	require.Equal(t, ErrNotFound, db.One("ID", 1, &deleted))
+}
+
+func TestTransactionMixedSaveUpdateDeleteIndexes(t *testing.T) {
+	db, cleanup := createDB(t)
+	defer cleanup()
+
+	require.NoError(t, db.Save(&IndexedNameUser{ID: 1, Name: "DeleteMe"}))
+	require.NoError(t, db.Save(&IndexedNameUser{ID: 2, Name: "UpdateMe"}))
+
+	tx, err := db.Begin(true)
+	require.NoError(t, err)
+	require.NoError(t, tx.Save(&IndexedNameUser{ID: 3, Name: "Created"}))
+	require.NoError(t, tx.UpdateField(&IndexedNameUser{ID: 2}, "Name", "Updated"))
+	require.NoError(t, tx.DeleteStruct(&IndexedNameUser{ID: 1}))
+	require.NoError(t, tx.Commit())
+
+	var users []IndexedNameUser
+	require.NoError(t, db.Find("Name", "Created", &users))
+	require.Len(t, users, 1)
+	require.Equal(t, 3, users[0].ID)
+
+	require.NoError(t, db.Find("Name", "Updated", &users))
+	require.Len(t, users, 1)
+	require.Equal(t, 2, users[0].ID)
+
+	err = db.Find("Name", "DeleteMe", &users)
+	require.Equal(t, ErrNotFound, err)
+}
+
+func TestTransactionDeleteSaveOrderIndexesFinalState(t *testing.T) {
+	db, cleanup := createDB(t)
+	defer cleanup()
+
+	require.NoError(t, db.Save(&IndexedNameUser{ID: 1, Name: "Original"}))
+
+	tx, err := db.Begin(true)
+	require.NoError(t, err)
+	require.NoError(t, tx.DeleteStruct(&IndexedNameUser{ID: 1}))
+	require.NoError(t, tx.Save(&IndexedNameUser{ID: 1, Name: "Restored"}))
+	require.NoError(t, tx.Commit())
+
+	var users []IndexedNameUser
+	require.NoError(t, db.Find("Name", "Restored", &users))
+	require.Len(t, users, 1)
+	require.Equal(t, 1, users[0].ID)
+
+	err = db.Find("Name", "Original", &users)
+	require.Equal(t, ErrNotFound, err)
+
+	tx, err = db.Begin(true)
+	require.NoError(t, err)
+	require.NoError(t, tx.Save(&IndexedNameUser{ID: 2, Name: "Transient"}))
+	require.NoError(t, tx.DeleteStruct(&IndexedNameUser{ID: 2}))
+	require.NoError(t, tx.Commit())
+
+	err = db.Find("Name", "Transient", &users)
+	require.Equal(t, ErrNotFound, err)
+}
+
 func TestTransactionNotWritable(t *testing.T) {
 	db, cleanup := createDB(t)
 	defer cleanup()

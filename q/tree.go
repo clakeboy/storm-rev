@@ -161,7 +161,7 @@ type strictEq struct {
 }
 
 func (s *strictEq) MatchField(v any) (bool, error) {
-	return compare(v, s.value, token.EQL), nil
+	return reflect.DeepEqual(v, s.value), nil
 }
 
 type in struct {
@@ -252,7 +252,7 @@ func EqF(field1, field2 string) Matcher {
 
 // StrictEq matcher, checks if the given field is deeply equal to the given value
 func StrictEq(field string, v any) Matcher {
-	return NewFieldMatcher(field, &cmp{value: v, token: token.EQL})
+	return NewFieldMatcher(field, &strictEq{value: v})
 }
 
 // Gt matcher, checks if the given field is greater than the given value

@@ -5,7 +5,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/clakeboy/storm-rev/index"
 	"github.com/clakeboy/storm-rev/q"
 	bolt "go.etcd.io/bbolt"
 )
@@ -77,6 +76,13 @@ func (s *sorter) filter(tree q.Matcher, bucket *bolt.Bucket, k, v []byte) (bool,
 		return false, s.sink.add(itm)
 	}
 
+	if rsink, ok := s.sink.(reflectSink); ok {
+		value := rsink.elem()
+		if err := s.node.Codec().Unmarshal(v, value.Interface()); err != nil {
+			return false, err
+		}
+		itm.value = &value
+	}
 	s.list = append(s.list, itm)
 
 	return false, nil
@@ -380,11 +386,7 @@ func (l *listSink) bucketName() string {
 
 func (l *listSink) add(i *item) error {
 	if l.idx == len(l.results) {
-		if l.isPtr {
-			l.results = append(l.results, i.v)
-		} else {
-			l.results = append(l.results, nil)
-		}
+		l.results = append(l.results, i.v)
 	}
 
 	l.idx++
@@ -396,12 +398,12 @@ func (l *listSink) flush() error {
 	if len(l.results) > 0 {
 		tmplist := reflect.MakeSlice(reflect.Indirect(l.ref).Type(), len(l.results), len(l.results))
 		for i, v := range l.results {
+			pr := l.elem()
+			l.node.Codec().Unmarshal(v.([]byte), pr.Interface())
 			if l.isPtr {
-				pr := l.elem()
-				l.node.Codec().Unmarshal(v.([]byte), pr.Interface())
 				tmplist.Index(i).Set(pr)
 			} else {
-				tmplist.Index(i).Set(l.elem())
+				tmplist.Index(i).Set(pr.Elem())
 			}
 		}
 		reflect.Indirect(l.ref).Set(tmplist)
@@ -494,27 +496,28 @@ func (d *deleteSink) add(i *item) error {
 	if err != nil {
 		return err
 	}
-
-	for fieldName, fieldCfg := range info.Fields {
-		if fieldCfg.Index == "" {
-			continue
-		}
-		idx, err := getIndex(i.bucket, fieldCfg.Index, fieldName)
-		if err != nil {
-			return err
-		}
-
-		err = idx.RemoveID(i.k)
-		if err != nil {
-			if err == index.ErrNotFound {
-				return ErrNotFound
-			}
-			return err
-		}
+	n, ok := d.node.(*node)
+	if !ok {
+		return ErrBadType
 	}
 
+	if raw := i.bucket.Get(i.k); raw == nil {
+		return ErrNotFound
+	}
+	if err := i.bucket.Delete(i.k); err != nil {
+		return err
+	}
+	if n.tx != nil {
+		n.markTxIndexDirty(info)
+		d.removed++
+		return nil
+	}
+	if err := n.s.indexer.deleteRecord(info, i.k); err != nil {
+		n.s.indexer.markDirty(info.Name)
+		return err
+	}
 	d.removed++
-	return i.bucket.Delete(i.k)
+	return nil
 }
 
 func (d *deleteSink) flush() error {
@@ -631,9 +634,11 @@ func (e *eachSink) bucketName() string {
 }
 
 func (e *eachSink) add(i *item) error {
-	// value := e.elem()
-	// e.node.Codec().Unmarshal(i.v, value.Interface())
-	return e.execFn(i.v)
+	value := e.elem()
+	if err := e.node.Codec().Unmarshal(i.v, value.Interface()); err != nil {
+		return err
+	}
+	return e.execFn(value.Interface())
 }
 
 func (e *eachSink) flush() error {

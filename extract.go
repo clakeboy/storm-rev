@@ -3,11 +3,9 @@ package storm
 import (
 	"fmt"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
-
-	"github.com/clakeboy/storm-rev/index"
-	bolt "go.etcd.io/bbolt"
 )
 
 // Storm tags
@@ -15,8 +13,10 @@ const (
 	tagID        = "id"
 	tagIdx       = "index"
 	tagUniqueIdx = "unique"
+	tagFullText  = "fulltext"
 	tagInline    = "inline"
 	tagIncrement = "increment"
+	tagComposite = "composite"
 	indexPrefix  = "__storm_index_"
 )
 
@@ -31,13 +31,21 @@ type fieldConfig struct {
 	Value          *reflect.Value
 	ForceUpdate    bool
 	JsonFieldName  string
+	Composites     map[string]int
 }
 
 // structConfig is a structure gathering all the relevant informations about a model
 type structConfig struct {
+	Name             string
+	Type             reflect.Type
+	Fields           map[string]*fieldConfig
+	ID               *fieldConfig
+	CompositeIndexes map[string]*compositeIndexConfig
+}
+
+type compositeIndexConfig struct {
 	Name   string
-	Fields map[string]*fieldConfig
-	ID     *fieldConfig
+	Fields []*fieldConfig
 }
 
 func extract(s *reflect.Value, mi ...*structConfig) (*structConfig, error) {
@@ -64,6 +72,9 @@ func extract(s *reflect.Value, mi ...*structConfig) (*structConfig, error) {
 
 	if m.Name == "" {
 		m.Name = typ.Name()
+	}
+	if m.Type == nil {
+		m.Type = typ
 	}
 
 	numFields := s.NumField()
@@ -93,6 +104,10 @@ func extract(s *reflect.Value, mi ...*structConfig) (*structConfig, error) {
 		return nil, ErrNoName
 	}
 
+	if err := validateCompositeIndexes(m); err != nil {
+		return nil, err
+	}
+
 	return m, nil
 }
 
@@ -108,7 +123,7 @@ func extractField(value *reflect.Value, field *reflect.StructField, m *structCon
 			IsInteger:      isInteger(value),
 			Value:          value,
 			IncrementStart: 1,
-			JsonFieldName:  strings.Split(field.Tag.Get("json"), ",")[0],
+			JsonFieldName:  jsonFieldName(field),
 		}
 
 		tags := strings.Split(tag, ",")
@@ -118,7 +133,7 @@ func extractField(value *reflect.Value, field *reflect.StructField, m *structCon
 			case "id":
 				f.IsID = true
 				f.Index = tagUniqueIdx
-			case tagUniqueIdx, tagIdx:
+			case tagUniqueIdx, tagIdx, tagFullText:
 				f.Index = tag
 			case tagInline:
 				if value.Kind() == reflect.Ptr {
@@ -135,7 +150,11 @@ func extractField(value *reflect.Value, field *reflect.StructField, m *structCon
 				// we don't need to save this field
 				return nil
 			default:
-				if strings.HasPrefix(tag, tagIncrement) {
+				if strings.HasPrefix(tag, tagComposite+"=") {
+					if err := parseCompositeTag(f, tag); err != nil {
+						return err
+					}
+				} else if strings.HasPrefix(tag, tagIncrement) {
 					f.Increment = true
 					parts := strings.Split(tag, "=")
 					if parts[0] != tagIncrement {
@@ -173,7 +192,7 @@ func extractField(value *reflect.Value, field *reflect.StructField, m *structCon
 				IsID:           true,
 				Value:          value,
 				IncrementStart: 1,
-				JsonFieldName:  strings.Split(field.Tag.Get("json"), ",")[0],
+				JsonFieldName:  jsonFieldName(field),
 			}
 			m.Fields[field.Name] = f
 		}
@@ -182,12 +201,20 @@ func extractField(value *reflect.Value, field *reflect.StructField, m *structCon
 	if _, ok := m.Fields[field.Name]; !ok {
 		f = &fieldConfig{
 			Name:          field.Name,
-			JsonFieldName: strings.Split(field.Tag.Get("json"), ",")[0],
+			JsonFieldName: jsonFieldName(field),
 		}
 		m.Fields[field.Name] = f
 	}
 
 	return nil
+}
+
+func jsonFieldName(field *reflect.StructField) string {
+	name := strings.Split(field.Tag.Get("json"), ",")[0]
+	if name == "" {
+		return field.Name
+	}
+	return name
 }
 
 func extractSingleField(ref *reflect.Value, fieldName string) (*structConfig, error) {
@@ -208,25 +235,73 @@ func extractSingleField(ref *reflect.Value, fieldName string) (*structConfig, er
 	return &cfg, nil
 }
 
-func getIndex(bucket *bolt.Bucket, idxKind string, fieldName string) (index.Index, error) {
-	var idx index.Index
-	var err error
-
-	switch idxKind {
-	case tagUniqueIdx:
-		idx, err = index.NewUniqueIndex(bucket, []byte(indexPrefix+fieldName))
-	case tagIdx:
-		idx, err = index.NewListIndex(bucket, []byte(indexPrefix+fieldName))
-	default:
-		err = ErrIdxNotFound
-	}
-
-	return idx, err
+// Indexed reports whether this field must be present in the external Bleve index.
+func (f *fieldConfig) Indexed() bool {
+	return f != nil && (f.Index != "" || len(f.Composites) > 0)
 }
 
-// delete existing index
-func deleteIndex(bucket *bolt.Bucket, fieldName string) error {
-	return bucket.DeleteBucket([]byte(indexPrefix + fieldName))
+// parseCompositeTag parses storm:"composite=name:order[;other:order]".
+func parseCompositeTag(f *fieldConfig, tag string) error {
+	raw := strings.TrimPrefix(tag, tagComposite+"=")
+	if raw == "" {
+		return ErrUnknownTag
+	}
+	if f.Composites == nil {
+		f.Composites = make(map[string]int)
+	}
+
+	for _, part := range strings.Split(raw, ";") {
+		name, orderText, ok := strings.Cut(part, ":")
+		if !ok || name == "" || orderText == "" {
+			return ErrUnknownTag
+		}
+		order, err := strconv.Atoi(orderText)
+		if err != nil || order <= 0 {
+			return ErrUnknownTag
+		}
+		f.Composites[name] = order
+	}
+	return nil
+}
+
+// validateCompositeIndexes builds ordered composite index metadata and rejects ambiguous tags.
+func validateCompositeIndexes(cfg *structConfig) error {
+	grouped := make(map[string]map[int]*fieldConfig)
+	for _, field := range cfg.Fields {
+		for name, order := range field.Composites {
+			if grouped[name] == nil {
+				grouped[name] = make(map[int]*fieldConfig)
+			}
+			if grouped[name][order] != nil {
+				return fmt.Errorf("composite index %s has duplicate order %d", name, order)
+			}
+			grouped[name][order] = field
+		}
+	}
+	if len(grouped) == 0 {
+		return nil
+	}
+
+	cfg.CompositeIndexes = make(map[string]*compositeIndexConfig, len(grouped))
+	for name, fieldsByOrder := range grouped {
+		orders := make([]int, 0, len(fieldsByOrder))
+		for order := range fieldsByOrder {
+			orders = append(orders, order)
+		}
+		sort.Ints(orders)
+		for i, order := range orders {
+			if order != i+1 {
+				return fmt.Errorf("composite index %s must use continuous order starting at 1", name)
+			}
+		}
+
+		composite := &compositeIndexConfig{Name: name, Fields: make([]*fieldConfig, 0, len(orders))}
+		for _, order := range orders {
+			composite.Fields = append(composite.Fields, fieldsByOrder[order])
+		}
+		cfg.CompositeIndexes[name] = composite
+	}
+	return nil
 }
 
 func isZero(v *reflect.Value) bool {

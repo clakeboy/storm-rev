@@ -154,3 +154,33 @@ func BenchmarkSave(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkSaveManyLoop(b *testing.B) {
+	db, cleanup := createDB(b)
+	defer cleanup()
+
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		w := User{Name: "John"}
+		err := db.Save(&w)
+		if err != nil {
+			b.Error(err)
+		}
+	}
+}
+
+func BenchmarkSaveAll(b *testing.B) {
+	db, cleanup := createDB(b)
+	defer cleanup()
+
+	users := make([]User, b.N)
+	for i := range users {
+		users[i].Name = "John"
+	}
+
+	b.ResetTimer()
+	err := db.SaveAll(users)
+	if err != nil {
+		b.Error(err)
+	}
+}

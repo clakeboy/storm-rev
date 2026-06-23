@@ -52,6 +52,9 @@ func Open(path string, stormOptions ...func(*Options) error) (*DB, error) {
 	if opts.boltOptions == nil {
 		opts.boltOptions = &bolt.Options{Timeout: 1 * time.Second}
 	}
+	if opts.path == "" {
+		opts.path = path
+	}
 
 	s.Node = &n
 
@@ -62,6 +65,7 @@ func Open(path string, stormOptions ...func(*Options) error) (*DB, error) {
 			return nil, err
 		}
 	}
+	s.indexer = newBleveIndexManager(opts.path, n.codec)
 
 	err = s.checkVersion()
 	if err != nil {
@@ -79,10 +83,16 @@ type DB struct {
 
 	// Bolt is still easily accessible
 	Bolt *bolt.DB
+
+	indexer *bleveIndexManager
 }
 
 // Close the database
 func (s *DB) Close() error {
+	if err := s.indexer.close(); err != nil {
+		_ = s.Bolt.Close()
+		return err
+	}
 	return s.Bolt.Close()
 }
 
