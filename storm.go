@@ -15,8 +15,8 @@ const (
 	metadataBucket = "__storm_metadata"
 )
 
-// Defaults to json
-var defaultCodec = json.Codec
+// defaultCodec uses Sonic's JSON implementation for the default object codec.
+var defaultCodec = json.Sonic
 
 // Open opens a database at the given path with optional Storm options.
 func Open(path string, stormOptions ...func(*Options) error) (*DB, error) {

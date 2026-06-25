@@ -1,4 +1,4 @@
-# MStorm
+# Storm-rev
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/clakeboy/storm-rev.svg)](https://pkg.go.dev/github.com/clakeboy/storm-rev)
 
@@ -6,7 +6,7 @@ This project is a fork of [storm](https://github.com/asdine/storm), which is a s
 
 Chinese documentation: [README.zh-CN.md](README.zh-CN.md).
 
-MStorm is a simple and powerful toolkit for [BoltDB](https://github.com/coreos/bbolt). It provides typed CRUD helpers, external [Bleve](https://github.com/blevesearch/bleve) indexes, composite indexes, full-text search, an advanced query system, and much more.
+Storm-rev is a simple and powerful toolkit for [BoltDB](https://github.com/coreos/bbolt). It provides typed CRUD helpers, external [Bleve](https://github.com/blevesearch/bleve) indexes, composite indexes, full-text search, an advanced query system, and much more.
 
 In addition to the examples below, see also the [examples in the GoDoc](https://godoc.org/github.com/asdine/storm#pkg-examples).
 
@@ -14,7 +14,7 @@ _For extended queries and support for [Badger](https://github.com/dgraph-io/badg
 
 ## Table of Contents
 
-- [MStorm](#mstorm)
+- [Storm-rev](#Storm-rev)
   - [Table of Contents](#table-of-contents)
   - [Getting Started](#getting-started)
   - [Import Storm](#import-storm)
@@ -348,16 +348,20 @@ err := db.Drop("User")
 err := db.ReIndex(&User{})
 ```
 
-Useful when the structure has changed or when external index files need to be rebuilt.
+Useful when the structure has changed, when external index files need to be rebuilt, or after an index was marked dirty because an index update or consistency check failed.
 `ReIndex` is the only public index rebuild method.
 
 #### Index files
 
-MStorm stores records in BoltDB and stores indexes as external Bleve indexes.
+Storm-rev stores records in BoltDB and stores indexes as external Bleve indexes.
 If the Bolt database is `/path/app.db`, index files are stored under `/path/app_db_index/`.
 Each table gets its own Bleve index directory, for example `/path/app_db_index/User.bleve`.
 
-BoltDB remains the source of truth. If an external index becomes inconsistent, rebuild it with:
+BoltDB remains the source of truth. Bleve indexes are derived data and can be recreated from BoltDB at any time. The index documents store exact-match tokens, typed values for range/prefix scans, field-existence markers, full-text fields, and composite-index markers for the indexed struct fields.
+
+Writes update the external index after BoltDB accepts the data. `SaveAll` groups records by table and writes each table through one Bleve batch. Deletes are also removed from Bleve, and transactional saves/deletes are applied in batches after `Commit`.
+
+If an index hit points to a missing Bolt record, or an index update fails, the table index is marked dirty. Dirty indexes are not trusted for indexed query planning; callers can rebuild them with:
 
 ```go
 err := db.ReIndex(&User{})
@@ -367,6 +371,8 @@ err := db.ReIndex(&User{})
 
 For more complex queries, you can use the `Select` method.
 `Select` takes any number of [`Matcher`](https://godoc.org/github.com/asdine/storm/q#Matcher) from the [`q`](https://godoc.org/github.com/asdine/storm/q) package.
+
+`Select` uses external indexes when it can build a safe candidate plan, then still runs the original matcher as the final filter. It can use `Eq`/`StrictEq` on indexed fields and IDs, `In` on indexed fields, closed ranges written as `And(Gte(...), Lte(...))`, complete composite equality matches, and `Or` only when every branch can use an index. Unsupported matchers, unindexed conditions, zero/nil values that are not present in the index, open transactions, and dirty indexes fall back to scanning the Bolt bucket. `OrderBy`, `Skip`, `Limit`, `Reverse`, `Find`, `First`, `Count`, `Each`, `Raw`, and `Delete` continue to use the same query pipeline.
 
 Here are some common Matchers:
 
@@ -518,6 +524,8 @@ if err != nil {
 return tx.Commit()
 ```
 
+Queries inside an open transaction read from BoltDB and fall back to scanning instead of trusting external indexes, so they can see uncommitted changes. On `Commit`, pending index drops are applied first, dirty tables are rebuilt, then pending deletes and saves are written to Bleve in batches. `Rollback` discards both the BoltDB changes and the pending external-index work.
+
 ### Options
 
 Storm options are functions that can be passed when constructing you Storm instance. You can pass it any number of options.
@@ -533,7 +541,7 @@ db, err := storm.Open("my.db", storm.BoltOptions(0600, &bolt.Options{Timeout: 1 
 
 #### MarshalUnmarshaler
 
-To store the data in BoltDB, Storm marshals it in JSON by default. If you wish to change this behavior you can pass a codec that implements [`codec.MarshalUnmarshaler`](https://godoc.org/github.com/asdine/storm/codec#MarshalUnmarshaler) via the [`storm.Codec`](https://godoc.org/github.com/asdine/storm#Codec) option:
+To store the data in BoltDB, Storm marshals it with Sonic-backed JSON by default. If you wish to change this behavior you can pass a codec that implements [`codec.MarshalUnmarshaler`](https://godoc.org/github.com/asdine/storm/codec#MarshalUnmarshaler) via the [`storm.Codec`](https://godoc.org/github.com/asdine/storm#Codec) option:
 
 ```go
 db := storm.Open("my.db", storm.Codec(myCodec))
@@ -541,7 +549,7 @@ db := storm.Open("my.db", storm.Codec(myCodec))
 
 ##### Provided Codecs
 
-You can easily implement your own `MarshalUnmarshaler`, but Storm comes with built-in support for [JSON](https://godoc.org/github.com/asdine/storm/codec/json) (default), [GOB](https://godoc.org/github.com/asdine/storm/codec/gob),  [Sereal](https://godoc.org/github.com/asdine/storm/codec/sereal), [Protocol Buffers](https://godoc.org/github.com/asdine/storm/codec/protobuf) and [MessagePack](https://godoc.org/github.com/asdine/storm/codec/msgpack).
+You can easily implement your own `MarshalUnmarshaler`, but Storm comes with built-in support for [JSON](https://godoc.org/github.com/asdine/storm/codec/json) (Sonic-backed by default, with the standard-library codec also available), [GOB](https://godoc.org/github.com/asdine/storm/codec/gob),  [Sereal](https://godoc.org/github.com/asdine/storm/codec/sereal), [Protocol Buffers](https://godoc.org/github.com/asdine/storm/codec/protobuf) and [MessagePack](https://godoc.org/github.com/asdine/storm/codec/msgpack).
 
 These can be used by importing the relevant package and use that codec to configure Storm. The example below shows all variants (without proper error handling):
 

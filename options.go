@@ -17,7 +17,7 @@ func BoltOptions(mode os.FileMode, options *bolt.Options) func(*Options) error {
 	}
 }
 
-// Codec used to set a custom encoder and decoder. The default is JSON.
+// Codec used to set a custom encoder and decoder. The default is Sonic-backed JSON.
 func Codec(c codec.MarshalUnmarshaler) func(*Options) error {
 	return func(opts *Options) error {
 		opts.codec = c

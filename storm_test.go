@@ -36,7 +36,7 @@ func TestNewStorm(t *testing.T) {
 
 	require.NoError(t, err)
 	require.NotNil(t, db.Bolt)
-	require.Equal(t, defaultCodec, db.Codec())
+	require.Equal(t, json.Sonic, db.Codec())
 
 	var v string
 	err = db.Get(dbinfo, "version", &v)

@@ -51,9 +51,9 @@ func TestNodeWithCodec(t *testing.T) {
 		defer cleanup()
 
 		n := db.From("a").(*node)
-		require.Equal(t, json.Codec, n.codec)
+		require.Equal(t, json.Sonic, n.codec)
 		n = n.From("b", "c", "d").(*node)
-		require.Equal(t, json.Codec, n.codec)
+		require.Equal(t, json.Sonic, n.codec)
 		n = db.WithCodec(gob.Codec).(*node)
 		n = n.From("e").(*node)
 		require.Equal(t, gob.Codec, n.codec)
