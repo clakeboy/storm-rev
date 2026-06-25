@@ -436,11 +436,13 @@ func TestSelectDelete(t *testing.T) {
 
 	err = db.Select(q.Gte("ID", 5)).Delete(&User{})
 	require.NoError(t, err)
+	require.False(t, db.indexer.isDirty("User"))
 
 	var user User
 	err = db.One("Name", "John6", &user)
 	require.Error(t, err)
 	require.Equal(t, ErrNotFound, err)
+	require.False(t, db.indexer.isDirty("User"))
 
 	err = db.One("Name", "John4", &user)
 	require.NoError(t, err)

@@ -368,6 +368,74 @@ func TestSaveAll(t *testing.T) {
 	require.Equal(t, ErrZeroID, db.SaveAll([]SimpleUser{{Name: "missing id"}}))
 }
 
+func TestSaveAllConcurrentWithoutBatch(t *testing.T) {
+	db, cleanup := createDB(t)
+	defer cleanup()
+
+	type ConcurrentSaveAllUser struct {
+		ID     int    `storm:"id"`
+		Worker int    `storm:"index"`
+		Name   string `storm:"index"`
+	}
+
+	const (
+		workers   = 8
+		perWorker = 25
+	)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+
+			// Give each goroutine its own slice and globally unique IDs so the
+			// test only exercises concurrent SaveAll behavior.
+			users := make([]ConcurrentSaveAllUser, perWorker)
+			for i := 0; i < perWorker; i++ {
+				id := worker*perWorker + i + 1
+				workerID := worker + 1
+				users[i] = ConcurrentSaveAllUser{
+					ID:     id,
+					Worker: workerID,
+					Name:   fmt.Sprintf("worker-%d-user-%d", worker, i),
+				}
+			}
+
+			errs <- db.SaveAll(users)
+		}(worker)
+	}
+
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	var all []ConcurrentSaveAllUser
+	require.NoError(t, db.All(&all))
+	require.Len(t, all, workers*perWorker)
+
+	for worker := 0; worker < workers; worker++ {
+		workerID := worker + 1
+		var found []ConcurrentSaveAllUser
+		require.NoError(t, db.Find("Worker", workerID, &found))
+		require.Len(t, found, perWorker)
+
+		seen := make(map[int]bool, perWorker)
+		for _, user := range found {
+			seen[user.ID] = true
+		}
+		for i := 0; i < perWorker; i++ {
+			id := worker*perWorker + i + 1
+			require.True(t, seen[id], "missing ID %d for worker %d", id, workerID)
+		}
+	}
+}
+
 func TestSaveAllIncrement(t *testing.T) {
 	db, cleanup := createDB(t)
 	defer cleanup()

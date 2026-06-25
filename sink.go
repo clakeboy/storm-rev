@@ -471,16 +471,24 @@ func newDeleteSink(node Node, kind interface{}) (*deleteSink, error) {
 		return nil, ErrStructPtrNeeded
 	}
 
+	cfg, err := extract(&ref)
+	if err != nil {
+		return nil, err
+	}
+
 	return &deleteSink{
 		node: node,
 		ref:  ref,
+		cfg:  cfg,
 	}, nil
 }
 
 type deleteSink struct {
 	node    Node
 	ref     reflect.Value
+	cfg     *structConfig
 	removed int
+	records []*deletedRecord
 }
 
 func (d *deleteSink) elem() reflect.Value {
@@ -492,10 +500,6 @@ func (d *deleteSink) bucketName() string {
 }
 
 func (d *deleteSink) add(i *item) error {
-	info, err := extract(&d.ref)
-	if err != nil {
-		return err
-	}
 	n, ok := d.node.(*node)
 	if !ok {
 		return ErrBadType
@@ -507,15 +511,17 @@ func (d *deleteSink) add(i *item) error {
 	if err := i.bucket.Delete(i.k); err != nil {
 		return err
 	}
+	// Keep index mutation outside the Bolt delete loop so query deletes batch cleanly.
+	record := &deletedRecord{
+		cfg: d.cfg,
+		id:  append([]byte(nil), i.k...),
+	}
 	if n.tx != nil {
-		n.markTxIndexDirty(info)
+		n.markTxIndexDelete(record)
 		d.removed++
 		return nil
 	}
-	if err := n.s.indexer.deleteRecord(info, i.k); err != nil {
-		n.s.indexer.markDirty(info.Name)
-		return err
-	}
+	d.records = append(d.records, record)
 	d.removed++
 	return nil
 }

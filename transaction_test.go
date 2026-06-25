@@ -3,6 +3,7 @@ package storm
 import (
 	"testing"
 
+	"github.com/clakeboy/storm-rev/q"
 	"github.com/stretchr/testify/require"
 )
 
@@ -171,6 +172,36 @@ func TestTransactionDeleteStructUsesIncrementalIndexDelete(t *testing.T) {
 	require.Equal(t, ErrNotFound, db.One("ID", 1, &deleted))
 }
 
+func TestTransactionQueryDeleteUsesIncrementalIndexDelete(t *testing.T) {
+	db, cleanup := createDB(t)
+	defer cleanup()
+
+	require.NoError(t, db.Save(&IndexedNameUser{ID: 1, Name: "John"}))
+	require.NoError(t, db.Save(&IndexedNameUser{ID: 2, Name: "John"}))
+	require.NoError(t, db.Save(&IndexedNameUser{ID: 3, Name: "Jane"}))
+
+	tx, err := db.Begin(true)
+	require.NoError(t, err)
+
+	err = tx.Select(q.Eq("Name", "John")).Delete(&IndexedNameUser{})
+	require.NoError(t, err)
+
+	ntx := tx.(*node)
+	require.Empty(t, ntx.txIndexDirty)
+	require.Len(t, ntx.txIndexDeletes["IndexedNameUser"], 2)
+
+	require.NoError(t, tx.Commit())
+
+	var users []IndexedNameUser
+	err = db.Find("Name", "John", &users)
+	require.Equal(t, ErrNotFound, err)
+	require.False(t, db.indexer.isDirty("IndexedNameUser"))
+
+	require.NoError(t, db.Find("Name", "Jane", &users))
+	require.Len(t, users, 1)
+	require.Equal(t, 3, users[0].ID)
+}
+
 func TestTransactionMixedSaveUpdateDeleteIndexes(t *testing.T) {
 	db, cleanup := createDB(t)
 	defer cleanup()
@@ -195,6 +226,32 @@ func TestTransactionMixedSaveUpdateDeleteIndexes(t *testing.T) {
 	require.Equal(t, 2, users[0].ID)
 
 	err = db.Find("Name", "DeleteMe", &users)
+	require.Equal(t, ErrNotFound, err)
+}
+
+func TestTransactionMixedSaveQueryDeleteIndexes(t *testing.T) {
+	db, cleanup := createDB(t)
+	defer cleanup()
+
+	require.NoError(t, db.Save(&IndexedNameUser{ID: 1, Name: "Original"}))
+
+	tx, err := db.Begin(true)
+	require.NoError(t, err)
+	require.NoError(t, tx.Select(q.Eq("Name", "Original")).Delete(&IndexedNameUser{}))
+	require.NoError(t, tx.Save(&IndexedNameUser{ID: 1, Name: "Restored"}))
+	require.NoError(t, tx.Save(&IndexedNameUser{ID: 2, Name: "Transient"}))
+	require.NoError(t, tx.Select(q.Eq("Name", "Transient")).Delete(&IndexedNameUser{}))
+	require.NoError(t, tx.Commit())
+
+	var users []IndexedNameUser
+	require.NoError(t, db.Find("Name", "Restored", &users))
+	require.Len(t, users, 1)
+	require.Equal(t, 1, users[0].ID)
+
+	err = db.Find("Name", "Original", &users)
+	require.Equal(t, ErrNotFound, err)
+
+	err = db.Find("Name", "Transient", &users)
 	require.Equal(t, ErrNotFound, err)
 }
 

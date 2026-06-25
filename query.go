@@ -123,7 +123,14 @@ func (q *query) Delete(kind any) error {
 		return err
 	}
 
-	return q.runQuery(sink)
+	if err := q.runQuery(sink); err != nil {
+		return err
+	}
+	if q.node.tx != nil {
+		return nil
+	}
+	// Bolt has committed here, so external indexes can be updated in one batch.
+	return q.node.deleteIndexedRecords(sink.records)
 }
 
 func (q *query) Count(kind any) (int, error) {
