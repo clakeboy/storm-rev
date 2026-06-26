@@ -48,4 +48,22 @@ var (
 
 	// ErrDifferentCodec is returned when using a codec different than the first codec used with the bucket.
 	ErrDifferentCodec = errors.New("the selected codec is incompatible with this bucket")
+
+	// ErrUnsupportedSQL is returned when the SQL layer receives syntax it does not execute.
+	ErrUnsupportedSQL = errors.New("unsupported sql statement")
+
+	// ErrSQLTableNotRegistered is returned when a SQL table has no registered model.
+	ErrSQLTableNotRegistered = errors.New("sql table is not registered")
+
+	// ErrSQLUnknownField is returned when a SQL column cannot be matched to a model field.
+	ErrSQLUnknownField = errors.New("sql field is not registered")
+
+	// ErrSQLBadProjectionTarget is returned when Project receives an unsupported destination.
+	ErrSQLBadProjectionTarget = errors.New("sql projection target must be a pointer to slice")
+
+	// ErrSQLArguments is returned when SQL placeholders do not match supplied args.
+	ErrSQLArguments = errors.New("sql arguments mismatch")
+
+	// ErrSQLUnsafeWrite is returned when UPDATE or DELETE would affect a whole table by default.
+	ErrSQLUnsafeWrite = errors.New("sql update/delete without where is not allowed")
 )

@@ -41,6 +41,9 @@ type Node interface {
 
 	// WithBatch returns a new Storm Node with the batch mode enabled.
 	WithBatch(enabled bool) Node
+
+	// SQL returns a SQL interpreter bound to this node and the provided models.
+	SQL(models ...any) (*SQL, error)
 }
 
 // A Node in Storm represents the API to a BoltDB bucket.

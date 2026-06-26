@@ -9,6 +9,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/tidwall/gjson v1.18.0
 	github.com/vmihailenco/msgpack v4.0.4+incompatible
+	github.com/xwb1989/sqlparser v0.0.0-20180606152119-120387863bf2
 	go.etcd.io/bbolt v1.4.0
 )
 

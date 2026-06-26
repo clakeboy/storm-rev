@@ -55,8 +55,11 @@ func (n *node) init(tx *bolt.Tx, cfg *structConfig) error {
 	}
 
 	// save node configuration in the bucket
-	_, err = newMeta(bucket, n)
+	meta, err := newMeta(bucket, n)
 	if err != nil {
+		return err
+	}
+	if err := meta.setSchema(cfg); err != nil {
 		return err
 	}
 
