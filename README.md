@@ -272,6 +272,29 @@ var users []User
 err := db.FindByIndex("group_age", []any{"staff", 21}, &users)
 ```
 
+`Select` can also use a composite index when an `And` matcher contains equality
+conditions for every field in the composite index:
+
+```go
+err = db.Select(q.And(
+  q.Eq("Group", "staff"),
+  q.Eq("Age", 21),
+)).Find(&users)
+```
+
+`In` does not currently expand into composite-index lookups. A query such as
+`q.And(q.In("Group", []string{"staff", "admin"}), q.Eq("Age", 21))` can still
+use a single-field index when one exists, then the full matcher filters the
+candidate records. To force composite-index usage, expand the condition into
+`Or` branches where each branch has full equality values:
+
+```go
+err = db.Select(q.Or(
+  q.And(q.Eq("Group", "staff"), q.Eq("Age", 21)),
+  q.And(q.Eq("Group", "admin"), q.Eq("Age", 21)),
+)).Find(&users)
+```
+
 #### Full-text search
 
 Use `storm:"fulltext"` for fields that should be analyzed by Bleve and queried with `Search`.

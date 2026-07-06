@@ -160,10 +160,18 @@ func TestSelectDeleteUpdatesIndexFromCandidates(t *testing.T) {
 
 	err := db.Select(q.Eq("Value", 5)).Delete(&selectIndexedScore{})
 	require.NoError(t, err)
+	require.False(t, db.indexer.isDirty("selectIndexedScore"))
 
 	var scores []selectIndexedScore
 	err = db.Find("Value", 5, &scores)
 	require.Equal(t, ErrNotFound, err)
+	require.False(t, db.indexer.isDirty("selectIndexedScore"))
+
+	err = db.Select(q.And(q.Gte("Value", 4), q.Lte("Value", 6))).OrderBy("Value").Find(&scores)
+	require.NoError(t, err)
+	require.Len(t, scores, 2)
+	require.Equal(t, []int{4, 6}, []int{scores[0].Value, scores[1].Value})
+	require.False(t, db.indexer.isDirty("selectIndexedScore"))
 }
 
 func TestSelectFallsBackWhenIndexDirty(t *testing.T) {

@@ -130,6 +130,67 @@ func TestBleveReIndexRebuildsDroppedIndex(t *testing.T) {
 	require.Len(t, users, 2)
 }
 
+func TestBleveExtendsMappingForAddedIndexField(t *testing.T) {
+	dir, err := os.MkdirTemp(os.TempDir(), "storm-bleve-mapping")
+	require.NoError(t, err)
+	defer os.RemoveAll(dir)
+
+	dbPath := filepath.Join(dir, "storm.db")
+	db, err := Open(dbPath)
+	require.NoError(t, err)
+
+	{
+		type User struct {
+			ID    int
+			Name  string `storm:"index"`
+			Group string
+		}
+
+		require.NoError(t, db.Save(&User{ID: 1, Name: "old", Group: "staff"}))
+	}
+
+	{
+		type User struct {
+			ID    int
+			Name  string `storm:"index"`
+			Group string `storm:"index"`
+		}
+
+		require.NoError(t, db.Save(&User{ID: 2, Name: "new", Group: "staff"}))
+
+		var byGroup []User
+		require.NoError(t, db.Find("Group", "staff", &byGroup))
+		require.Len(t, byGroup, 1)
+		require.Equal(t, 2, byGroup[0].ID)
+
+		var byName []User
+		require.NoError(t, db.Find("Name", "old", &byName))
+		require.Len(t, byName, 1)
+		require.Equal(t, 1, byName[0].ID)
+	}
+
+	require.NoError(t, db.Close())
+
+	db, err = Open(dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+
+	{
+		type User struct {
+			ID    int
+			Name  string `storm:"index"`
+			Group string `storm:"index"`
+		}
+
+		require.NoError(t, db.Save(&User{ID: 3, Name: "reopened", Group: "staff"}))
+
+		var byGroup []User
+		require.NoError(t, db.Find("Group", "staff", &byGroup))
+		require.Len(t, byGroup, 2)
+		require.Equal(t, []int{2, 3}, []int{byGroup[0].ID, byGroup[1].ID})
+	}
+}
+
 func TestCompositeIndexTagErrors(t *testing.T) {
 	type duplicateOrder struct {
 		ID int

@@ -15,6 +15,7 @@ import (
 	"github.com/blevesearch/bleve/v2"
 	"github.com/blevesearch/bleve/v2/mapping"
 	blevequery "github.com/blevesearch/bleve/v2/search/query"
+	"github.com/blevesearch/bleve/v2/util"
 	"github.com/clakeboy/storm-rev/codec"
 	"github.com/clakeboy/storm-rev/index"
 	bolt "go.etcd.io/bbolt"
@@ -146,7 +147,7 @@ func (m *bleveIndexManager) tableIndex(cfg *structConfig) (bleve.Index, error) {
 	defer m.mu.Unlock()
 
 	if idx := m.indexes[cfg.Name]; idx != nil {
-		return idx, nil
+		return idx, ensureBleveMappingFields(idx, cfg)
 	}
 
 	if err := os.MkdirAll(m.root, 0o755); err != nil {
@@ -160,6 +161,11 @@ func (m *bleveIndexManager) tableIndex(cfg *structConfig) (bleve.Index, error) {
 		if err != nil {
 			return nil, err
 		}
+	} else if err := ensureBleveMappingFields(idx, cfg); err != nil {
+		if closeErr := idx.Close(); closeErr != nil {
+			return nil, closeErr
+		}
+		return nil, err
 	}
 
 	m.indexes[cfg.Name] = idx
@@ -231,16 +237,25 @@ func safeIndexName(name string) string {
 func buildBleveMapping(cfg *structConfig) *mapping.IndexMappingImpl {
 	indexMapping := bleve.NewIndexMapping()
 	docMapping := bleve.NewDocumentStaticMapping()
-	seen := make(map[string]bool)
 
+	for field, fm := range requiredBleveFieldMappings(cfg) {
+		docMapping.AddFieldMappingsAt(field, fm)
+	}
+
+	indexMapping.DefaultMapping = docMapping
+	return indexMapping
+}
+
+// requiredBleveFieldMappings returns the exact Bleve fields needed to index cfg.
+func requiredBleveFieldMappings(cfg *structConfig) map[string]*mapping.FieldMapping {
+	fields := make(map[string]*mapping.FieldMapping)
 	add := func(field string, fm *mapping.FieldMapping) {
-		if seen[field] {
+		if fields[field] != nil {
 			return
 		}
 		fm.Store = false
 		fm.IncludeInAll = false
-		docMapping.AddFieldMappingsAt(field, fm)
-		seen[field] = true
+		fields[field] = fm
 	}
 
 	for _, field := range cfg.Fields {
@@ -248,7 +263,7 @@ func buildBleveMapping(cfg *structConfig) *mapping.IndexMappingImpl {
 			continue
 		}
 		add(exactField(field.Name), bleve.NewKeywordFieldMapping())
-		add(valueField(field.Name), valueFieldMapping(field))
+		add(valueField(field.Name), valueFieldMapping(cfg, field))
 		if field.Index == tagFullText {
 			add(textField(field.Name), bleve.NewTextFieldMapping())
 		}
@@ -259,25 +274,81 @@ func buildBleveMapping(cfg *structConfig) *mapping.IndexMappingImpl {
 		add(compositeField(name), bleve.NewBooleanFieldMapping())
 	}
 
-	indexMapping.DefaultMapping = docMapping
-	return indexMapping
+	return fields
+}
+
+// ensureBleveMappingFields extends an existing index mapping for newly added indexed fields.
+func ensureBleveMappingFields(idx bleve.Index, cfg *structConfig) error {
+	indexMapping, ok := idx.Mapping().(*mapping.IndexMappingImpl)
+	if !ok {
+		return ErrIncompatibleValue
+	}
+	if indexMapping.DefaultMapping == nil {
+		return ErrIncompatibleValue
+	}
+
+	var changed bool
+	for name, required := range requiredBleveFieldMappings(cfg) {
+		current := bleveFieldMapping(indexMapping.DefaultMapping, name)
+		if current == nil {
+			indexMapping.DefaultMapping.AddFieldMappingsAt(name, required)
+			changed = true
+			continue
+		}
+		if !compatibleBleveFieldMapping(current, required) {
+			return ErrIncompatibleValue
+		}
+	}
+	if !changed {
+		return nil
+	}
+	if err := indexMapping.Validate(); err != nil {
+		return err
+	}
+
+	raw, err := util.MarshalJSON(indexMapping)
+	if err != nil {
+		return err
+	}
+	return idx.SetInternal(util.MappingInternalKey, raw)
+}
+
+// bleveFieldMapping finds the single top-level field mapping created by buildBleveMapping.
+func bleveFieldMapping(docMapping *mapping.DocumentMapping, name string) *mapping.FieldMapping {
+	if docMapping == nil || docMapping.Properties == nil {
+		return nil
+	}
+
+	property := docMapping.Properties[name]
+	if property == nil || len(property.Fields) == 0 {
+		return nil
+	}
+	return property.Fields[0]
+}
+
+// compatibleBleveFieldMapping rejects field type changes that need an explicit ReIndex.
+func compatibleBleveFieldMapping(current, required *mapping.FieldMapping) bool {
+	if current == nil || required == nil {
+		return current == required
+	}
+	return current.Type == required.Type &&
+		current.Analyzer == required.Analyzer &&
+		current.DateFormat == required.DateFormat &&
+		current.Index == required.Index
 }
 
 // valueFieldMapping chooses the field mapping used for range and prefix operations.
-func valueFieldMapping(field *fieldConfig) *mapping.FieldMapping {
-	if field.Value == nil {
+func valueFieldMapping(cfg *structConfig, field *fieldConfig) *mapping.FieldMapping {
+	typ := fieldValueType(cfg, field)
+	if typ == nil {
 		return bleve.NewKeywordFieldMapping()
 	}
 
-	v := derefValue(*field.Value)
-	if !v.IsValid() {
-		return bleve.NewKeywordFieldMapping()
-	}
-	if _, ok := v.Interface().(time.Time); ok {
+	if typ == reflect.TypeOf(time.Time{}) {
 		return bleve.NewDateTimeFieldMapping()
 	}
 
-	switch v.Kind() {
+	switch typ.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
 		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
 		reflect.Float32, reflect.Float64:
@@ -287,6 +358,34 @@ func valueFieldMapping(field *fieldConfig) *mapping.FieldMapping {
 	default:
 		return bleve.NewKeywordFieldMapping()
 	}
+}
+
+// fieldValueType returns the declared field type, unwrapping pointers without reading values.
+func fieldValueType(cfg *structConfig, field *fieldConfig) reflect.Type {
+	if field == nil {
+		return nil
+	}
+
+	if field.Value != nil && field.Value.IsValid() {
+		return derefType(field.Value.Type())
+	}
+	if cfg == nil || cfg.Type == nil {
+		return nil
+	}
+
+	if sf, ok := cfg.Type.FieldByName(field.Name); ok {
+		return derefType(sf.Type)
+	}
+
+	return nil
+}
+
+// derefType unwraps pointer declarations while preserving the underlying field type.
+func derefType(typ reflect.Type) reflect.Type {
+	for typ.Kind() == reflect.Ptr {
+		typ = typ.Elem()
+	}
+	return typ
 }
 
 // indexRecord writes one record into the table index, replacing any previous version.

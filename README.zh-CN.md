@@ -160,6 +160,33 @@ var users []User
 err := db.FindByIndex("group_age", []any{"staff", 21}, &users)
 ```
 
+`Select` 也可以在 `And` 条件中包含复合索引所有字段的等值匹配时使用复合索引：
+
+```go
+err = db.Select(q.And(
+  q.Eq("Group", "staff"),
+  q.Eq("Age", 21),
+)).Find(&users)
+```
+
+`In` 当前不会展开成多次复合索引查询。下面这种写法如果字段本身有普通索引，可以先走单字段索引，再由完整 matcher 过滤候选记录：
+
+```go
+err = db.Select(q.And(
+  q.In("Group", []string{"staff", "admin"}),
+  q.Eq("Age", 21),
+)).Find(&users)
+```
+
+如果希望明确使用复合索引，可以把 `In` 展开成多个完整等值分支：
+
+```go
+err = db.Select(q.Or(
+  q.And(q.Eq("Group", "staff"), q.Eq("Age", 21)),
+  q.And(q.Eq("Group", "admin"), q.Eq("Age", 21)),
+)).Find(&users)
+```
+
 ### 全文搜索
 
 `fulltext` 字段使用 Bleve 分词索引，并通过 `Search` 查询。`Find` 仍保持精确匹配语义。
