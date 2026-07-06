@@ -275,6 +275,9 @@ func (n *node) save(tx *bolt.Tx, cfg *structConfig, data any, update bool, uniqu
 	if err != nil {
 		return nil, err
 	}
+	if err := meta.ensureSchema(cfg); err != nil {
+		return nil, err
+	}
 
 	if cfg.ID.IsZero {
 		err = meta.increment(cfg.ID)

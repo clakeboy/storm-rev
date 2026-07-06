@@ -70,6 +70,14 @@ func (m *meta) setSchema(cfg *structConfig) error {
 	return m.bucket.Put([]byte(metaSchema), raw)
 }
 
+// ensureSchema persists table schema once so bucket-list APIs can identify tables.
+func (m *meta) ensureSchema(cfg *structConfig) error {
+	if m.bucket.Get([]byte(metaSchema)) != nil {
+		return nil
+	}
+	return m.setSchema(cfg)
+}
+
 func readStoredSchema(bucket *bolt.Bucket) (*storedSchema, error) {
 	if bucket == nil {
 		return nil, ErrNotFound

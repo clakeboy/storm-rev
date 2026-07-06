@@ -199,8 +199,12 @@ func extractField(value *reflect.Value, field *reflect.StructField, m *structCon
 		m.ID = f
 	}
 	if _, ok := m.Fields[field.Name]; !ok {
+		// Keep non-indexed fields complete for persisted schema metadata.
 		f = &fieldConfig{
 			Name:          field.Name,
+			IsZero:        isZero(value),
+			IsInteger:     isInteger(value),
+			Value:         value,
 			JsonFieldName: jsonFieldName(field),
 		}
 		m.Fields[field.Name] = f
