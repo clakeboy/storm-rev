@@ -67,6 +67,12 @@ func (n *node) init(tx *bolt.Tx, cfg *structConfig) error {
 }
 
 func (n *node) ReIndex(data any) error {
+	if data == nil {
+		return n.readWriteTx(func(tx *bolt.Tx) error {
+			return n.reIndexFromStoredMetadata(tx)
+		})
+	}
+
 	ref := reflect.ValueOf(data)
 
 	if !ref.IsValid() || ref.Kind() != reflect.Ptr || ref.Elem().Kind() != reflect.Struct {
@@ -79,16 +85,98 @@ func (n *node) ReIndex(data any) error {
 	}
 
 	return n.readWriteTx(func(tx *bolt.Tx) error {
-		return n.reIndex(tx, data, cfg)
+		bucket := n.GetBucket(tx, cfg.Name)
+		if bucket == nil {
+			return ErrNotFound
+		}
+
+		// A concrete struct is the caller's latest schema, so persist it before rebuilding.
+		meta, err := newMeta(bucket, n)
+		if err != nil {
+			return err
+		}
+		if err := meta.setSchema(cfg); err != nil {
+			return err
+		}
+
+		return n.reIndexBucket(tx, bucket, cfg)
 	})
 }
 
-func (n *node) reIndex(tx *bolt.Tx, data any, cfg *structConfig) error {
-	bucket := n.GetBucket(tx, cfg.Name)
+func (n *node) reIndexFromStoredMetadata(tx *bolt.Tx) error {
+	if len(n.rootBucket) == 0 {
+		return n.reIndexRootTablesFromStoredMetadata(tx)
+	}
+
+	bucket := n.GetBucket(tx)
 	if bucket == nil {
 		return ErrNotFound
 	}
+	if isStormTableBucket(bucket) {
+		return n.reIndexStoredMetadataBucket(tx, bucket)
+	}
 
+	return n.reIndexDirectTablesFromStoredMetadata(tx, bucket)
+}
+
+// reIndexRootTablesFromStoredMetadata rebuilds direct table buckets at the DB root.
+func (n *node) reIndexRootTablesFromStoredMetadata(tx *bolt.Tx) error {
+	var rebuilt bool
+	c := tx.Cursor()
+	for k, v := c.First(); k != nil; k, v = c.Next() {
+		name := string(k)
+		if v != nil || isStormSystemBucket(name) {
+			continue
+		}
+		bucket := tx.Bucket(k)
+		if !isStormTableBucket(bucket) {
+			continue
+		}
+		if err := n.reIndexStoredMetadataBucket(tx, bucket); err != nil {
+			return err
+		}
+		rebuilt = true
+	}
+	if !rebuilt {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// reIndexDirectTablesFromStoredMetadata rebuilds direct table buckets below the current node.
+func (n *node) reIndexDirectTablesFromStoredMetadata(tx *bolt.Tx, parent *bolt.Bucket) error {
+	var rebuilt bool
+	c := parent.Cursor()
+	for k, v := c.First(); k != nil; k, v = c.Next() {
+		name := string(k)
+		if v != nil || isStormSystemBucket(name) {
+			continue
+		}
+		bucket := parent.Bucket(k)
+		if !isStormTableBucket(bucket) {
+			continue
+		}
+		if err := n.reIndexStoredMetadataBucket(tx, bucket); err != nil {
+			return err
+		}
+		rebuilt = true
+	}
+	if !rebuilt {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// reIndexStoredMetadataBucket rebuilds one table bucket using its persisted schema metadata.
+func (n *node) reIndexStoredMetadataBucket(tx *bolt.Tx, bucket *bolt.Bucket) error {
+	schema, err := readStoredSchema(bucket)
+	if err != nil {
+		return err
+	}
+	return n.reIndexBucket(tx, bucket, structConfigFromStoredSchema(schema))
+}
+
+func (n *node) reIndexBucket(tx *bolt.Tx, bucket *bolt.Bucket, cfg *structConfig) error {
 	if err := n.s.indexer.rebuildFromBolt(cfg, bucket, n); err != nil {
 		return err
 	}

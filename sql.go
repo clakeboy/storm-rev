@@ -276,37 +276,19 @@ func newSQLModel(model any) (*sqlModel, error) {
 }
 
 func newSQLModelFromSchema(schema *storedSchema) *sqlModel {
-	dynamicType := dynamicStructType(schema)
-	cfg := &structConfig{
-		Name:   schema.Table,
-		Type:   dynamicType,
-		Fields: make(map[string]*fieldConfig),
-	}
+	cfg := structConfigFromStoredSchema(schema)
 	info := &sqlModel{
 		table:      schema.Table,
-		typ:        dynamicType,
+		typ:        cfg.Type,
 		cfg:        cfg,
 		fields:     make(map[string]*fieldConfig),
 		fieldTypes: make(map[string]reflect.Type),
 		metadata:   true,
 	}
 	for _, stored := range schema.Fields {
-		field := &fieldConfig{
-			Name:           stored.Name,
-			Index:          stored.Index,
-			IsID:           stored.ID,
-			Increment:      stored.Increment,
-			IncrementStart: stored.IncrementStart,
-			IsInteger:      stored.Integer,
-			JsonFieldName:  stored.JSON,
-			Composites:     stored.Composites,
-		}
-		if field.JsonFieldName == "" {
-			field.JsonFieldName = field.Name
-		}
-		cfg.Fields[field.Name] = field
-		if field.IsID || schema.ID == field.Name {
-			cfg.ID = field
+		field := cfg.Fields[stored.Name]
+		if field == nil {
+			continue
 		}
 		info.addFieldName(field.Name, field)
 		info.addFieldName(field.JsonFieldName, field)
@@ -314,7 +296,6 @@ func newSQLModelFromSchema(schema *storedSchema) *sqlModel {
 			info.fieldTypes[field.Name] = typ
 		}
 	}
-	_ = validateCompositeIndexes(cfg)
 	return info
 }
 

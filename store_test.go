@@ -106,6 +106,81 @@ func TestReIndex(t *testing.T) {
 	require.DirExists(t, filepath.Join(indexRootDir(db.Bolt.Path()), safeIndexName("User")+bleveIndexSuffix))
 }
 
+func TestReIndexUpdatesStoredMetadataFromStruct(t *testing.T) {
+	db, cleanup := createDB(t)
+	defer cleanup()
+
+	{
+		type User struct {
+			ID   int
+			Name string
+		}
+
+		require.NoError(t, db.Save(&User{ID: 1, Name: "John"}))
+	}
+
+	{
+		type User struct {
+			ID    int
+			Name  string `storm:"index"`
+			Group string `storm:"unique"`
+		}
+
+		require.NoError(t, db.ReIndex(&User{}))
+
+		var users []User
+		require.NoError(t, db.Find("Name", "John", &users))
+		require.Len(t, users, 1)
+	}
+
+	columns, err := db.ListColumns("", "User")
+	require.NoError(t, err)
+	require.Equal(t, tagIdx, requireColumn(t, columns, "Name").Index)
+	require.Equal(t, tagUniqueIdx, requireColumn(t, columns, "Group").Index)
+}
+
+func TestReIndexNilUsesStoredMetadata(t *testing.T) {
+	db, cleanup := createDB(t)
+	defer cleanup()
+
+	type reindexMetadataUser struct {
+		ID   int
+		Name string `storm:"index"`
+	}
+
+	require.NoError(t, db.Save(&reindexMetadataUser{ID: 1, Name: "John"}))
+	require.NoError(t, db.Save(&reindexMetadataUser{ID: 2, Name: "Jane"}))
+	require.NoError(t, db.indexer.dropTable("reindexMetadataUser"))
+
+	var users []reindexMetadataUser
+	require.Equal(t, ErrNotFound, db.Find("Name", "John", &users))
+
+	require.NoError(t, db.ReIndex(nil))
+	require.NoError(t, db.Find("Name", "John", &users))
+	require.Len(t, users, 1)
+}
+
+func TestReIndexNilUsesStoredMetadataBelowCurrentNode(t *testing.T) {
+	db, cleanup := createDB(t)
+	defer cleanup()
+
+	type reindexMetadataIssue struct {
+		ID    int
+		Title string `storm:"index"`
+	}
+
+	repo := db.From("repo")
+	require.NoError(t, repo.Save(&reindexMetadataIssue{ID: 1, Title: "Bug"}))
+	require.NoError(t, db.indexer.dropTable("reindexMetadataIssue"))
+
+	var issues []reindexMetadataIssue
+	require.Equal(t, ErrNotFound, repo.Find("Title", "Bug", &issues))
+
+	require.NoError(t, repo.ReIndex(nil))
+	require.NoError(t, repo.Find("Title", "Bug", &issues))
+	require.Len(t, issues, 1)
+}
+
 func TestSave(t *testing.T) {
 	db, cleanup := createDB(t)
 	defer cleanup()

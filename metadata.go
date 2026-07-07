@@ -97,6 +97,38 @@ func readStoredSchema(bucket *bolt.Bucket) (*storedSchema, error) {
 	return &schema, nil
 }
 
+// structConfigFromStoredSchema rebuilds the runtime table configuration saved in metadata.
+// It is used when callers want to rebuild indexes without passing a concrete struct value.
+func structConfigFromStoredSchema(schema *storedSchema) *structConfig {
+	dynamicType := dynamicStructType(schema)
+	cfg := &structConfig{
+		Name:   schema.Table,
+		Type:   dynamicType,
+		Fields: make(map[string]*fieldConfig, len(schema.Fields)),
+	}
+	for _, stored := range schema.Fields {
+		field := &fieldConfig{
+			Name:           stored.Name,
+			Index:          stored.Index,
+			IsID:           stored.ID,
+			Increment:      stored.Increment,
+			IncrementStart: stored.IncrementStart,
+			IsInteger:      stored.Integer,
+			JsonFieldName:  stored.JSON,
+			Composites:     stored.Composites,
+		}
+		if field.JsonFieldName == "" {
+			field.JsonFieldName = field.Name
+		}
+		cfg.Fields[field.Name] = field
+		if field.IsID || schema.ID == field.Name {
+			cfg.ID = field
+		}
+	}
+	_ = validateCompositeIndexes(cfg)
+	return cfg
+}
+
 func storedSchemaFromConfig(cfg *structConfig) storedSchema {
 	schema := storedSchema{
 		Table: cfg.Name,

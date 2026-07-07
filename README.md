@@ -40,6 +40,7 @@ _For extended queries and support for [Badger](https://github.com/dgraph-io/badg
       - [Re-index a bucket](#re-index-a-bucket)
       - [Index files](#index-files)
     - [Advanced queries](#advanced-queries)
+    - [SQL usage](#sql-usage)
     - [Transactions](#transactions)
     - [Options](#options)
       - [BoltOptions](#boltoptions)
@@ -521,6 +522,117 @@ err = query.Each(new(User), func(record interface{}) error) {
 ```
 
 See the [documentation](https://godoc.org/github.com/asdine/storm#Query) for a complete list of methods.
+
+### SQL usage
+
+Storm-rev also exposes a small SQL layer for single-table reads and writes. It is useful when callers already build SQL strings, while still keeping BoltDB as the source of truth and keeping Storm-rev indexes in sync.
+
+Register model metadata explicitly when you create the SQL helper:
+
+```go
+type User struct {
+  ID     int    `storm:"id,increment" json:"id"`
+  Name   string `storm:"index" json:"name"`
+  Age    int    `storm:"index" json:"age"`
+  Team   string `storm:"index" json:"team"`
+  Active bool   `json:"active"`
+}
+
+// Register the User table and its columns.
+sqlDB, err := db.SQL(&User{})
+if err != nil {
+  return err
+}
+```
+
+The table name is the Storm bucket/model name. Column names can use either Go field names or JSON tag names, case-insensitively. If schema metadata already exists, for example after `Init`, `Save`, or `SaveAll`, `db.SQL()` can also load table definitions from metadata.
+
+Use `Find` or `First` for `SELECT *` queries:
+
+```go
+var users []User
+
+// Placeholders are bound from the variadic args.
+err := sqlDB.Find(
+  "SELECT * FROM User WHERE age >= ? AND team IN (?, ?) ORDER BY age DESC LIMIT 10",
+  &users,
+  18,
+  "staff",
+  "admin",
+)
+```
+
+Use `Project` for selected columns. The destination can be `[]map[string]any` or a DTO slice:
+
+```go
+type UserDTO struct {
+  Username string `json:"username"`
+  UserAge  int    `json:"user_age"`
+}
+
+var rows []UserDTO
+
+// Column aliases are matched against map keys or DTO json tags.
+err := sqlDB.Project(
+  "SELECT name AS username, age AS user_age FROM User WHERE team = ? ORDER BY age ASC",
+  &rows,
+  "staff",
+)
+```
+
+Use `Count` for `SELECT COUNT(*)`:
+
+```go
+count, err := sqlDB.Count(
+  "SELECT COUNT(*) FROM User WHERE active = ?",
+  true,
+)
+```
+
+Use `Exec` for `INSERT`, `UPDATE`, and `DELETE`. Writes go through Storm-rev's save/delete path, so normal indexes and unique constraints are maintained.
+
+```go
+result, err := sqlDB.Exec(
+  "INSERT INTO User (name, age, team, active) VALUES (?, ?, ?, ?)",
+  "Alice",
+  31,
+  "staff",
+  true,
+)
+if err != nil {
+  return err
+}
+fmt.Println(result.RowsAffected, result.LastInsertID)
+
+result, err = sqlDB.Exec(
+  "UPDATE User SET team = ?, age = ? WHERE name = ?",
+  "ops",
+  32,
+  "Alice",
+)
+
+result, err = sqlDB.Exec(
+  "DELETE FROM User WHERE active = ?",
+  false,
+)
+```
+
+For safety, `UPDATE` and `DELETE` without `WHERE` return `ErrSQLUnsafeWrite` by default. Use `WithAllowFullTableWrite(true)` only when a whole-table write is intentional:
+
+```go
+result, err = sqlDB.WithAllowFullTableWrite(true).Exec("DELETE FROM User")
+```
+
+Supported SQL is intentionally limited:
+
+- One table per statement; joins, subqueries, `GROUP BY`, `HAVING`, and `DISTINCT` are not supported.
+- `WHERE` supports `=`, `!=`, `>`, `>=`, `<`, `<=`, `IN`, `NOT IN`, `AND`, `OR`, `NOT`, parentheses, literals, booleans, `NULL`, and `?` placeholders.
+- `ORDER BY` supports one or more columns, but all columns must use the same direction.
+- `LIMIT`/offset are supported for `SELECT`.
+- `Find` and `First` require `SELECT *`; use `Project` for column lists and `Count` for `COUNT(*)`.
+- `INSERT` requires an explicit column list and `VALUES`.
+- `UPDATE` does not support updating the ID field, `ORDER BY`, or `LIMIT`.
+- `DELETE` does not support `ORDER BY` or `LIMIT`.
 
 ### Transactions
 

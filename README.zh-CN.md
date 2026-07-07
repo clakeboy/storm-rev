@@ -333,6 +333,117 @@ err = query.Each(new(User), func(record interface{}) error {
 err = query.Delete(new(User))
 ```
 
+## SQL 使用
+
+Storm-rev 也提供一个小范围的 SQL 层，用于单表读写。它适合调用方已经在组织 SQL 字符串的场景，同时仍然以 BoltDB 作为事实数据源，并通过 Storm-rev 的保存/删除流程维护索引。
+
+创建 SQL 辅助对象时，可以显式注册模型元数据：
+
+```go
+type User struct {
+  ID     int    `storm:"id,increment" json:"id"`
+  Name   string `storm:"index" json:"name"`
+  Age    int    `storm:"index" json:"age"`
+  Team   string `storm:"index" json:"team"`
+  Active bool   `json:"active"`
+}
+
+// 注册 User 表和字段定义。
+sqlDB, err := db.SQL(&User{})
+if err != nil {
+  return err
+}
+```
+
+表名使用 Storm 的 bucket/model 名称。字段名可以使用 Go 字段名，也可以使用 JSON tag 名称，匹配时不区分大小写。如果表结构元数据已经存在，例如已经执行过 `Init`、`Save` 或 `SaveAll`，也可以通过 `db.SQL()` 从元数据加载表定义。
+
+`SELECT *` 使用 `Find` 或 `First`：
+
+```go
+var users []User
+
+// ? 占位符会按顺序绑定后面的参数。
+err := sqlDB.Find(
+  "SELECT * FROM User WHERE age >= ? AND team IN (?, ?) ORDER BY age DESC LIMIT 10",
+  &users,
+  18,
+  "staff",
+  "admin",
+)
+```
+
+查询部分字段使用 `Project`。目标可以是 `[]map[string]any`，也可以是 DTO 切片：
+
+```go
+type UserDTO struct {
+  Username string `json:"username"`
+  UserAge  int    `json:"user_age"`
+}
+
+var rows []UserDTO
+
+// 字段别名会匹配 map key 或 DTO 的 json tag。
+err := sqlDB.Project(
+  "SELECT name AS username, age AS user_age FROM User WHERE team = ? ORDER BY age ASC",
+  &rows,
+  "staff",
+)
+```
+
+`SELECT COUNT(*)` 使用 `Count`：
+
+```go
+count, err := sqlDB.Count(
+  "SELECT COUNT(*) FROM User WHERE active = ?",
+  true,
+)
+```
+
+`INSERT`、`UPDATE` 和 `DELETE` 使用 `Exec`。写入会走 Storm-rev 的保存/删除路径，因此会维护普通索引、唯一索引和外部 Bleve 索引。
+
+```go
+result, err := sqlDB.Exec(
+  "INSERT INTO User (name, age, team, active) VALUES (?, ?, ?, ?)",
+  "Alice",
+  31,
+  "staff",
+  true,
+)
+if err != nil {
+  return err
+}
+fmt.Println(result.RowsAffected, result.LastInsertID)
+
+result, err = sqlDB.Exec(
+  "UPDATE User SET team = ?, age = ? WHERE name = ?",
+  "ops",
+  32,
+  "Alice",
+)
+
+result, err = sqlDB.Exec(
+  "DELETE FROM User WHERE active = ?",
+  false,
+)
+```
+
+出于安全考虑，默认不允许没有 `WHERE` 的 `UPDATE` 和 `DELETE`，否则会返回 `ErrSQLUnsafeWrite`。只有明确需要整表写入时，才使用 `WithAllowFullTableWrite(true)`：
+
+```go
+result, err = sqlDB.WithAllowFullTableWrite(true).Exec("DELETE FROM User")
+```
+
+当前 SQL 支持范围是有意收窄的：
+
+- 每条语句只支持单表；不支持 join、子查询、`GROUP BY`、`HAVING` 和 `DISTINCT`。
+- `WHERE` 支持 `=`、`!=`、`>`、`>=`、`<`、`<=`、`IN`、`NOT IN`、`AND`、`OR`、`NOT`、括号、字面量、布尔值、`NULL` 和 `?` 占位符。
+- `ORDER BY` 支持一个或多个字段，但所有字段必须使用同一个排序方向。
+- `SELECT` 支持 `LIMIT` 和 offset。
+- `Find` 和 `First` 只接收 `SELECT *`；字段投影使用 `Project`，统计使用 `Count`。
+- `INSERT` 必须显式写字段列表，并使用 `VALUES`。
+- `UPDATE` 不支持更新 ID 字段，也不支持 `ORDER BY` 或 `LIMIT`。
+- `DELETE` 不支持 `ORDER BY` 或 `LIMIT`。
+
 ## 事务
 
 ```go
