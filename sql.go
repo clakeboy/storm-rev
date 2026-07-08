@@ -45,13 +45,14 @@ type sqlTableRef struct {
 }
 
 type sqlSelectPlan struct {
-	model   *sqlModel
-	table   sqlTableRef
-	matcher q.Matcher
-	orderBy []string
-	reverse bool
-	limit   int
-	skip    int
+	model      *sqlModel
+	table      sqlTableRef
+	matcher    q.Matcher
+	whereEmpty bool
+	orderBy    []string
+	reverse    bool
+	limit      int
+	skip       int
 }
 
 type sqlProjection struct {
@@ -435,13 +436,14 @@ func (s *SQL) buildSelectPlan(stmt *sqlparser.Select, reader *sqlArgReader) (*sq
 		return nil, err
 	}
 	return &sqlSelectPlan{
-		model:   model,
-		table:   table,
-		matcher: matcher,
-		orderBy: orderBy,
-		reverse: reverse,
-		limit:   limit,
-		skip:    skip,
+		model:      model,
+		table:      table,
+		matcher:    matcher,
+		whereEmpty: stmt.Where == nil,
+		orderBy:    orderBy,
+		reverse:    reverse,
+		limit:      limit,
+		skip:       skip,
 	}, nil
 }
 
@@ -476,6 +478,10 @@ func (s *SQL) selectRecords(plan *sqlSelectPlan) (reflect.Value, error) {
 }
 
 func (s *SQL) selectRawRecords(plan *sqlSelectPlan) ([]sqlRawRecord, error) {
+	if records, used, err := s.selectRawRecordsByIDCursor(plan); used || err != nil {
+		return records, err
+	}
+
 	var records []sqlRawRecord
 	err := s.node.readTx(func(tx *bolt.Tx) error {
 		bucket := s.node.GetBucket(tx, plan.model.table)
@@ -503,6 +509,89 @@ func (s *SQL) selectRawRecords(plan *sqlSelectPlan) ([]sqlRawRecord, error) {
 	}
 	sortRawRecords(records, plan.orderBy, plan.reverse)
 	return sliceRawRecords(records, plan.skip, plan.limit), nil
+}
+
+// selectRawRecordsByIDCursor handles the narrow metadata-only case where SQL
+// order is exactly the Bolt primary-key order, so LIMIT/OFFSET can stop early.
+func (s *SQL) selectRawRecordsByIDCursor(plan *sqlSelectPlan) ([]sqlRawRecord, bool, error) {
+	if !plan.canUseRawIDCursorOrder() {
+		return nil, false, nil
+	}
+	if plan.limit == 0 {
+		return nil, true, nil
+	}
+
+	var records []sqlRawRecord
+	err := s.node.readTx(func(tx *bolt.Tx) error {
+		bucket := s.node.GetBucket(tx, plan.model.table)
+		if bucket == nil {
+			return nil
+		}
+
+		cursor := bucket.Cursor()
+		key, raw := cursor.First()
+		if plan.reverse {
+			key, raw = cursor.Last()
+		}
+
+		skipped := 0
+		for key != nil {
+			if raw != nil && !bytes.Equal(key, []byte(metadataBucket)) {
+				if skipped < plan.skip {
+					skipped++
+				} else {
+					records = append(records, sqlRawRecord{raw: append([]byte(nil), raw...)})
+					if len(records) >= plan.limit {
+						return nil
+					}
+				}
+			}
+
+			if plan.reverse {
+				key, raw = cursor.Prev()
+			} else {
+				key, raw = cursor.Next()
+			}
+		}
+		return nil
+	})
+	return records, true, err
+}
+
+// canUseRawIDCursorOrder is intentionally strict: it only allows SQL shapes
+// where reading the main bucket cursor is equivalent to ORDER BY id.
+func (plan *sqlSelectPlan) canUseRawIDCursorOrder() bool {
+	if plan == nil || plan.model == nil || !plan.model.metadataOnly() {
+		return false
+	}
+	if !plan.whereEmpty || plan.limit < 0 || len(plan.orderBy) != 1 {
+		return false
+	}
+
+	idField := plan.model.cfg.ID
+	if idField == nil || plan.orderBy[0] != plan.model.queryFieldName(idField) {
+		return false
+	}
+	return plan.model.idFieldUsesBoltKeyOrder(idField)
+}
+
+// idFieldUsesBoltKeyOrder guards against changing SQL sort semantics for ID
+// types whose JSON value order does not match their stored Bolt key order.
+func (m *sqlModel) idFieldUsesBoltKeyOrder(field *fieldConfig) bool {
+	typ := m.fieldType(field)
+	if typ == nil {
+		return false
+	}
+
+	switch typ.Kind() {
+	case reflect.String:
+		return true
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return field.IsInteger && field.Increment && field.IncrementStart >= 0
+	default:
+		return false
+	}
 }
 
 func (s *SQL) countRawRecords(plan *sqlSelectPlan) (int, error) {

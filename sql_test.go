@@ -1,6 +1,7 @@
 package storm
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -108,6 +109,77 @@ func TestSQLProjectAndCountFromMetadata(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, users, 1)
 	require.Equal(t, "Alice", users[0].Name)
+}
+
+func TestSQLMetadataRawIDCursorOrderLimit(t *testing.T) {
+	db, cleanup := createDB(t)
+	defer cleanup()
+
+	require.NoError(t, db.Init(&SQLUser{}))
+	users := make([]*SQLUser, 0, 120)
+	for i := 1; i <= 120; i++ {
+		users = append(users, &SQLUser{
+			Name:   fmt.Sprintf("User%03d", i),
+			Age:    i,
+			Team:   "staff",
+			Active: true,
+		})
+	}
+	require.NoError(t, db.SaveAll(users))
+
+	sql, err := db.SQL()
+	require.NoError(t, err)
+
+	var descRows []map[string]any
+	err = sql.Project("SELECT id, name FROM SQLUser ORDER BY id DESC LIMIT 5", &descRows)
+	require.NoError(t, err)
+	require.Equal(t, []map[string]any{
+		{"id": 120, "name": "User120"},
+		{"id": 119, "name": "User119"},
+		{"id": 118, "name": "User118"},
+		{"id": 117, "name": "User117"},
+		{"id": 116, "name": "User116"},
+	}, descRows)
+
+	var ascRows []map[string]any
+	err = sql.Project("SELECT id, name FROM SQLUser ORDER BY ID ASC LIMIT 5 OFFSET 10", &ascRows)
+	require.NoError(t, err)
+	require.Equal(t, []map[string]any{
+		{"id": 11, "name": "User011"},
+		{"id": 12, "name": "User012"},
+		{"id": 13, "name": "User013"},
+		{"id": 14, "name": "User014"},
+		{"id": 15, "name": "User015"},
+	}, ascRows)
+
+	count, err := sql.Count("SELECT COUNT(*) FROM SQLUser ORDER BY id DESC LIMIT 5")
+	require.NoError(t, err)
+	require.Equal(t, 5, count)
+}
+
+func TestSQLMetadataRawIDCursorOrderEligibility(t *testing.T) {
+	db, cleanup := createDB(t)
+	defer cleanup()
+
+	require.NoError(t, db.Init(&SQLUser{}))
+
+	sql, err := db.SQL()
+	require.NoError(t, err)
+
+	eligible := buildSQLSelectPlanForTest(t, sql, "SELECT id FROM SQLUser ORDER BY id DESC LIMIT 5")
+	require.True(t, eligible.canUseRawIDCursorOrder())
+
+	withWhere := buildSQLSelectPlanForTest(t, sql, "SELECT id FROM SQLUser WHERE age >= ? ORDER BY id DESC LIMIT 5", 18)
+	require.False(t, withWhere.canUseRawIDCursorOrder())
+
+	byNonID := buildSQLSelectPlanForTest(t, sql, "SELECT id FROM SQLUser ORDER BY age DESC LIMIT 5")
+	require.False(t, byNonID.canUseRawIDCursorOrder())
+
+	multiOrder := buildSQLSelectPlanForTest(t, sql, "SELECT id FROM SQLUser ORDER BY id DESC, age DESC LIMIT 5")
+	require.False(t, multiOrder.canUseRawIDCursorOrder())
+
+	withoutLimit := buildSQLSelectPlanForTest(t, sql, "SELECT id FROM SQLUser ORDER BY id DESC")
+	require.False(t, withoutLimit.canUseRawIDCursorOrder())
 }
 
 func TestSQLMetadataExecMaintainsIndexes(t *testing.T) {
@@ -221,4 +293,15 @@ func TestSQLErrors(t *testing.T) {
 
 	err = sql.Project("SELECT name FROM SQLUser WHERE age > ?", &[]map[string]any{})
 	require.ErrorIs(t, err, ErrSQLArguments)
+}
+
+func buildSQLSelectPlanForTest(t *testing.T, sql *SQL, query string, args ...any) *sqlSelectPlan {
+	t.Helper()
+
+	stmt, reader, err := sql.parseSelect(query, args)
+	require.NoError(t, err)
+	plan, err := sql.buildSelectPlan(stmt, reader)
+	require.NoError(t, err)
+	require.NoError(t, reader.done())
+	return plan
 }

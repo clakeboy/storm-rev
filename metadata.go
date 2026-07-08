@@ -17,7 +17,9 @@ func newMeta(b *bolt.Bucket, n Node) (*meta, error) {
 	m := b.Bucket([]byte(metadataBucket))
 	if m != nil {
 		name := m.Get([]byte(metaCodec))
-		if string(name) != n.Codec().Name() {
+		if name == nil {
+			m.Put([]byte(metaCodec), []byte(n.Codec().Name()))
+		} else if string(name) != n.Codec().Name() {
 			return nil, ErrDifferentCodec
 		}
 		return &meta{
@@ -61,13 +63,18 @@ type storedSchemaField struct {
 	Composites     map[string]int `json:"composites,omitempty"`
 }
 
-// setSchema persists enough struct metadata for SQL map/DTO queries without registration.
-func (m *meta) setSchema(cfg *structConfig) error {
-	raw, err := json.Marshal(storedSchemaFromConfig(cfg))
+// setStoredSchema persists a complete table schema as metadata.
+func (m *meta) setStoredSchema(schema storedSchema) error {
+	raw, err := json.Marshal(schema)
 	if err != nil {
 		return err
 	}
 	return m.bucket.Put([]byte(metaSchema), raw)
+}
+
+// setSchema persists enough struct metadata for SQL map/DTO queries without registration.
+func (m *meta) setSchema(cfg *structConfig) error {
+	return m.setStoredSchema(storedSchemaFromConfig(cfg))
 }
 
 // ensureSchema persists table schema once so bucket-list APIs can identify tables.
