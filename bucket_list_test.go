@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/clakeboy/storm-rev/codec"
+	"github.com/clakeboy/storm-rev/v2/codec"
 	"github.com/stretchr/testify/require"
 	bolt "go.etcd.io/bbolt"
 )

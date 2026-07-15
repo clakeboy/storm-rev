@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/clakeboy/storm-rev/codec"
+	"github.com/clakeboy/storm-rev/v2/codec"
 )
 
 type testStruct struct {

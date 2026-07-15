@@ -3,7 +3,7 @@ package sereal
 import (
 	"testing"
 
-	"github.com/clakeboy/storm-rev/codec/internal"
+	"github.com/clakeboy/storm-rev/v2/codec/internal"
 	"github.com/stretchr/testify/require"
 )
 

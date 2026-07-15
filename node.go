@@ -1,7 +1,7 @@
 package storm
 
 import (
-	"github.com/clakeboy/storm-rev/codec"
+	"github.com/clakeboy/storm-rev/v2/codec"
 	bolt "go.etcd.io/bbolt"
 )
 

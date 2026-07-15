@@ -12,8 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	storm "github.com/clakeboy/storm-rev"
-	"github.com/clakeboy/storm-rev/q"
+	storm "github.com/clakeboy/storm-rev/v2"
+	"github.com/clakeboy/storm-rev/v2/q"
 )
 
 func ExampleRe() {

@@ -6,8 +6,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/clakeboy/storm-rev/codec/internal"
-	"github.com/clakeboy/storm-rev/codec/json"
+	"github.com/clakeboy/storm-rev/v2/codec/internal"
+	"github.com/clakeboy/storm-rev/v2/codec/json"
 )
 
 var testKey, _ = base64.StdEncoding.DecodeString("xkBTXc1wn0C/aL31u9SA7g==")

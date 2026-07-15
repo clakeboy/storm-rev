@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/clakeboy/storm-rev/codec/json"
-	"github.com/clakeboy/storm-rev/q"
+	"github.com/clakeboy/storm-rev/v2/codec/json"
+	"github.com/clakeboy/storm-rev/v2/q"
 	"github.com/stretchr/testify/require"
 )
 

@@ -5,8 +5,8 @@ import (
 	"encoding/binary"
 	"time"
 
-	"github.com/clakeboy/storm-rev/codec"
-	"github.com/clakeboy/storm-rev/codec/json"
+	"github.com/clakeboy/storm-rev/v2/codec"
+	"github.com/clakeboy/storm-rev/v2/codec/json"
 	bolt "go.etcd.io/bbolt"
 )
 

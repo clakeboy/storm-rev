@@ -3,7 +3,7 @@ package index
 import (
 	"bytes"
 
-	"github.com/clakeboy/storm-rev/internal"
+	"github.com/clakeboy/storm-rev/v2/internal"
 	bolt "go.etcd.io/bbolt"
 )
 

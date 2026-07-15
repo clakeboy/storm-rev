@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	storm "github.com/clakeboy/storm-rev"
-	"github.com/clakeboy/storm-rev/codec/gob"
+	storm "github.com/clakeboy/storm-rev/v2"
+	"github.com/clakeboy/storm-rev/v2/codec/gob"
 	bolt "go.etcd.io/bbolt"
 )
 

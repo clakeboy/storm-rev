@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/clakeboy/storm-rev/codec/gob"
-	"github.com/clakeboy/storm-rev/codec/json"
+	"github.com/clakeboy/storm-rev/v2/codec/gob"
+	"github.com/clakeboy/storm-rev/v2/codec/json"
 	"github.com/stretchr/testify/require"
 	bolt "go.etcd.io/bbolt"
 )

@@ -16,8 +16,8 @@ import (
 	"github.com/blevesearch/bleve/v2/mapping"
 	blevequery "github.com/blevesearch/bleve/v2/search/query"
 	"github.com/blevesearch/bleve/v2/util"
-	"github.com/clakeboy/storm-rev/codec"
-	"github.com/clakeboy/storm-rev/index"
+	"github.com/clakeboy/storm-rev/v2/codec"
+	"github.com/clakeboy/storm-rev/v2/index"
 	bolt "go.etcd.io/bbolt"
 )
 

@@ -4,7 +4,7 @@ package protobuf
 import (
 	"errors"
 
-	"github.com/clakeboy/storm-rev/codec/json"
+	"github.com/clakeboy/storm-rev/v2/codec/json"
 	"github.com/golang/protobuf/proto"
 )
 

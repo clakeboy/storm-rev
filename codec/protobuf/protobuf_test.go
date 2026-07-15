@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	storm "github.com/clakeboy/storm-rev"
-	"github.com/clakeboy/storm-rev/codec/internal"
+	storm "github.com/clakeboy/storm-rev/v2"
+	"github.com/clakeboy/storm-rev/v2/codec/internal"
 	"github.com/stretchr/testify/require"
 )
 

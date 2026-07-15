@@ -4,8 +4,8 @@ import (
 	"fmt"
 
 	"github.com/clakeboy/golib/utils"
-	"github.com/clakeboy/storm-rev/internal"
-	"github.com/clakeboy/storm-rev/q"
+	"github.com/clakeboy/storm-rev/v2/internal"
+	"github.com/clakeboy/storm-rev/v2/q"
 	bolt "go.etcd.io/bbolt"
 )
 

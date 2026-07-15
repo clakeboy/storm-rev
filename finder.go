@@ -6,8 +6,8 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/clakeboy/storm-rev/index"
-	"github.com/clakeboy/storm-rev/q"
+	"github.com/clakeboy/storm-rev/v2/index"
+	"github.com/clakeboy/storm-rev/v2/q"
 	bolt "go.etcd.io/bbolt"
 )
 

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/clakeboy/storm-rev/q"
+	"github.com/clakeboy/storm-rev/v2/q"
 )
 
 type SQLBenchUser struct {

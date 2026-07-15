@@ -3,12 +3,12 @@ package codec_test
 import (
 	"fmt"
 
-	storm "github.com/clakeboy/storm-rev"
-	"github.com/clakeboy/storm-rev/codec/gob"
-	"github.com/clakeboy/storm-rev/codec/json"
-	"github.com/clakeboy/storm-rev/codec/msgpack"
-	"github.com/clakeboy/storm-rev/codec/protobuf"
-	"github.com/clakeboy/storm-rev/codec/sereal"
+	storm "github.com/clakeboy/storm-rev/v2"
+	"github.com/clakeboy/storm-rev/v2/codec/gob"
+	"github.com/clakeboy/storm-rev/v2/codec/json"
+	"github.com/clakeboy/storm-rev/v2/codec/msgpack"
+	"github.com/clakeboy/storm-rev/v2/codec/protobuf"
+	"github.com/clakeboy/storm-rev/v2/codec/sereal"
 )
 
 func Example() {

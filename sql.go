@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/clakeboy/storm-rev/q"
+	"github.com/clakeboy/storm-rev/v2/q"
 	"github.com/tidwall/gjson"
 	"github.com/xwb1989/sqlparser"
 	bolt "go.etcd.io/bbolt"

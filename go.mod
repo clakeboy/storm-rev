@@ -1,4 +1,4 @@
-module github.com/clakeboy/storm-rev
+module github.com/clakeboy/storm-rev/v2
 
 require (
 	github.com/Sereal/Sereal v0.0.0-20190618215532-0b8ac451a863
