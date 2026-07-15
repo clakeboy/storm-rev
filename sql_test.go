@@ -182,6 +182,150 @@ func TestSQLMetadataRawIDCursorOrderEligibility(t *testing.T) {
 	require.False(t, withoutLimit.canUseRawIDCursorOrder())
 }
 
+func TestSQLMetadataRawIndexedOrderLimit(t *testing.T) {
+	db, cleanup := createDB(t)
+	defer cleanup()
+
+	require.NoError(t, db.Init(&SQLUser{}))
+	users := make([]*SQLUser, 0, 120)
+	for i := 1; i <= 120; i++ {
+		users = append(users, &SQLUser{
+			Name:   fmt.Sprintf("User%03d", i),
+			Age:    i,
+			Team:   "staff",
+			Active: true,
+		})
+	}
+	require.NoError(t, db.SaveAll(users))
+
+	sql, err := db.SQL()
+	require.NoError(t, err)
+
+	descPlan := buildSQLSelectPlanForTest(t, sql, "SELECT id, age FROM SQLUser ORDER BY age DESC LIMIT 5")
+	_, ok := descPlan.rawIndexedOrderField()
+	require.True(t, ok)
+	_, used, err := sql.selectRawRecordsByIndexedOrder(descPlan)
+	require.NoError(t, err)
+	require.True(t, used)
+
+	var descRows []map[string]any
+	err = sql.Project("SELECT id, age FROM SQLUser ORDER BY age DESC LIMIT 5", &descRows)
+	require.NoError(t, err)
+	require.Equal(t, []map[string]any{
+		{"id": 120, "age": 120},
+		{"id": 119, "age": 119},
+		{"id": 118, "age": 118},
+		{"id": 117, "age": 117},
+		{"id": 116, "age": 116},
+	}, descRows)
+
+	var ascRows []map[string]any
+	err = sql.Project("SELECT id, age FROM SQLUser ORDER BY age ASC LIMIT 5 OFFSET 10", &ascRows)
+	require.NoError(t, err)
+	require.Equal(t, []map[string]any{
+		{"id": 11, "age": 11},
+		{"id": 12, "age": 12},
+		{"id": 13, "age": 13},
+		{"id": 14, "age": 14},
+		{"id": 15, "age": 15},
+	}, ascRows)
+
+	count, err := sql.Count("SELECT COUNT(*) FROM SQLUser ORDER BY age DESC LIMIT 5")
+	require.NoError(t, err)
+	require.Equal(t, 5, count)
+}
+
+func TestSQLMetadataRawIndexedOrderCoverageLifecycle(t *testing.T) {
+	db, cleanup := createDB(t)
+	defer cleanup()
+
+	require.NoError(t, db.Init(&SQLUser{}))
+	require.NoError(t, db.SaveAll([]*SQLUser{
+		{Name: "Alice", Age: 10, Team: "staff", Active: true},
+		{Name: "Bob", Age: 20, Team: "staff", Active: true},
+		{Name: "Carol", Age: 30, Team: "staff", Active: true},
+	}))
+
+	sql, err := db.SQL()
+	require.NoError(t, err)
+	plan := buildSQLSelectPlanForTest(t, sql, "SELECT id, age FROM SQLUser ORDER BY age ASC LIMIT 5")
+	requireIndexedRawOrderUsed(t, sql, plan, true)
+
+	_, err = sql.Exec("UPDATE SQLUser SET age = ? WHERE id = ?", 0, 1)
+	require.NoError(t, err)
+	requireIndexedRawOrderUsed(t, sql, plan, false)
+
+	var rows []map[string]any
+	err = sql.Project("SELECT id, age FROM SQLUser ORDER BY age ASC LIMIT 1", &rows)
+	require.NoError(t, err)
+	require.Equal(t, []map[string]any{{"id": 1, "age": 0}}, rows)
+
+	_, err = sql.Exec("UPDATE SQLUser SET age = ? WHERE id = ?", 40, 1)
+	require.NoError(t, err)
+	requireIndexedRawOrderUsed(t, sql, plan, true)
+
+	_, err = sql.Exec("DELETE FROM SQLUser WHERE id = ?", 3)
+	require.NoError(t, err)
+	requireIndexedRawOrderUsed(t, sql, plan, true)
+
+	raw, err := db.GetBytes("SQLUser", 1)
+	require.NoError(t, err)
+	require.NoError(t, db.SetBytes("SQLUser", 1, raw))
+	requireIndexedRawOrderUsed(t, sql, plan, false)
+
+	require.NoError(t, db.ReIndex(nil))
+	requireIndexedRawOrderUsed(t, sql, plan, true)
+
+	columns, err := db.ListColumns("", "SQLUser")
+	require.NoError(t, err)
+	for i := range columns {
+		if columns[i].Name == "Age" {
+			columns[i].Index = tagUniqueIdx
+		}
+	}
+	require.NoError(t, db.SetTableMetadata("", "SQLUser", columns))
+	requireIndexedRawOrderUsed(t, sql, plan, false)
+
+	require.NoError(t, db.ReIndex(nil))
+	requireIndexedRawOrderUsed(t, sql, plan, true)
+}
+
+func TestSQLMetadataRawIndexedOrderEligibility(t *testing.T) {
+	db, cleanup := createDB(t)
+	defer cleanup()
+
+	require.NoError(t, db.Init(&SQLUser{}))
+	sql, err := db.SQL()
+	require.NoError(t, err)
+
+	eligible := buildSQLSelectPlanForTest(t, sql, "SELECT id FROM SQLUser ORDER BY age DESC LIMIT 5")
+	_, ok := eligible.rawIndexedOrderField()
+	require.True(t, ok)
+
+	withWhere := buildSQLSelectPlanForTest(t, sql, "SELECT id FROM SQLUser WHERE age >= ? ORDER BY age DESC LIMIT 5", 18)
+	_, ok = withWhere.rawIndexedOrderField()
+	require.False(t, ok)
+
+	byNonIndex := buildSQLSelectPlanForTest(t, sql, "SELECT id FROM SQLUser ORDER BY active DESC LIMIT 5")
+	_, ok = byNonIndex.rawIndexedOrderField()
+	require.False(t, ok)
+
+	multiOrder := buildSQLSelectPlanForTest(t, sql, "SELECT id FROM SQLUser ORDER BY age DESC, name DESC LIMIT 5")
+	_, ok = multiOrder.rawIndexedOrderField()
+	require.False(t, ok)
+
+	withoutLimit := buildSQLSelectPlanForTest(t, sql, "SELECT id FROM SQLUser ORDER BY age DESC")
+	_, ok = withoutLimit.rawIndexedOrderField()
+	require.False(t, ok)
+}
+
+func requireIndexedRawOrderUsed(t *testing.T, sql *SQL, plan *sqlSelectPlan, expected bool) {
+	t.Helper()
+	_, used, err := sql.selectRawRecordsByIndexedOrder(plan)
+	require.NoError(t, err)
+	require.Equal(t, expected, used)
+}
+
 func TestSQLMetadataExecMaintainsIndexes(t *testing.T) {
 	db, cleanup := createDB(t)
 	defer cleanup()

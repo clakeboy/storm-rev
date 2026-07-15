@@ -541,6 +541,56 @@ func (m *bleveIndexManager) searchAllByIndex(cfg *structConfig, fieldName string
 	return m.search(cfg, query)
 }
 
+// searchSortedByIndex returns one sorted page only when the persisted coverage
+// snapshot proves every primary record has this sortable indexed field.
+func (m *bleveIndexManager) searchSortedByIndex(cfg *structConfig, fieldName string, coverage *indexCoverage, reverse bool, limit, skip int) ([][]byte, bool) {
+	if m == nil || cfg == nil || coverage == nil || m.isDirty(cfg.Name) {
+		return nil, false
+	}
+	fieldCount, ok := coverage.Fields[fieldName]
+	if !ok || fieldCount != coverage.Records {
+		return nil, false
+	}
+
+	idx, err := m.tableIndex(cfg)
+	if err != nil {
+		return nil, false
+	}
+	docCount, err := idx.DocCount()
+	if err != nil || docCount != coverage.Records {
+		return nil, false
+	}
+
+	query := bleve.NewBoolFieldQuery(true)
+	query.SetField(hasField(fieldName))
+	check := bleve.NewSearchRequestOptions(query, 0, 0, false)
+	checkResult, err := idx.Search(check)
+	if err != nil || checkResult.Total != fieldCount {
+		return nil, false
+	}
+
+	req := bleve.NewSearchRequestOptions(query, limit, skip, false)
+	sortField := valueField(fieldName)
+	if reverse {
+		sortField = "-" + sortField
+	}
+	req.SortBy([]string{sortField})
+	result, err := idx.Search(req)
+	if err != nil {
+		return nil, false
+	}
+
+	ids := make([][]byte, 0, len(result.Hits))
+	for _, hit := range result.Hits {
+		id, err := decodeDocID(hit.ID)
+		if err != nil {
+			return nil, false
+		}
+		ids = append(ids, id)
+	}
+	return ids, true
+}
+
 // searchRange returns IDs whose typed field value is within the inclusive range.
 func (m *bleveIndexManager) searchRange(cfg *structConfig, fieldName string, min, max any) ([][]byte, error) {
 	query, err := rangeQuery(fieldName, min, max)
@@ -652,16 +702,18 @@ func rangeQuery(fieldName string, min, max any) (blevequery.Query, error) {
 	}
 }
 
-// rebuildFromBolt recreates the table index from Bolt records in one batch.
-func (m *bleveIndexManager) rebuildFromBolt(cfg *structConfig, bucket *bolt.Bucket, n *node) error {
+// rebuildFromBolt recreates the table index from Bolt records in one batch and
+// returns the matching coverage snapshot from that same decoded record stream.
+func (m *bleveIndexManager) rebuildFromBolt(cfg *structConfig, bucket *bolt.Bucket, n *node) (*indexCoverage, error) {
+	coverage := newIndexCoverage(cfg)
 	if m == nil {
-		return nil
+		return coverage, nil
 	}
 
 	idx, err := m.recreateTable(cfg)
 	if err != nil {
 		m.markDirty(cfg.Name)
-		return err
+		return nil, err
 	}
 
 	batch := idx.NewBatch()
@@ -674,25 +726,26 @@ func (m *bleveIndexManager) rebuildFromBolt(cfg *structConfig, bucket *bolt.Buck
 		elem := reflect.New(cfg.Type)
 		if err := n.codec.Unmarshal(raw, elem.Interface()); err != nil {
 			m.markDirty(cfg.Name)
-			return err
+			return nil, err
 		}
 		doc, err := m.document(cfg, elem.Interface())
 		if err != nil {
 			m.markDirty(cfg.Name)
-			return err
+			return nil, err
 		}
 		if err := batch.Index(encodeDocID(k), doc); err != nil {
 			m.markDirty(cfg.Name)
-			return err
+			return nil, err
 		}
+		coverage.addRecord(cfg, elem.Elem())
 	}
 
 	if err := idx.Batch(batch); err != nil {
 		m.markDirty(cfg.Name)
-		return err
+		return nil, err
 	}
 	m.clearDirty(cfg.Name)
-	return nil
+	return coverage, nil
 }
 
 // collectRecords sorts index hits according to the old Bolt index ordering and applies options.

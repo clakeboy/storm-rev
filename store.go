@@ -62,8 +62,13 @@ func (n *node) init(tx *bolt.Tx, cfg *structConfig) error {
 	if err := meta.setSchema(cfg); err != nil {
 		return err
 	}
-
-	return n.s.indexer.initTable(cfg)
+	if err := n.s.indexer.initTable(cfg); err != nil {
+		return err
+	}
+	if _, ok := meta.indexCoverage(); !ok && !bucketHasRawRecords(bucket) {
+		return meta.initializeIndexCoverage(cfg)
+	}
+	return nil
 }
 
 func (n *node) ReIndex(data any) error {
@@ -177,7 +182,15 @@ func (n *node) reIndexStoredMetadataBucket(tx *bolt.Tx, bucket *bolt.Bucket) err
 }
 
 func (n *node) reIndexBucket(tx *bolt.Tx, bucket *bolt.Bucket, cfg *structConfig) error {
-	if err := n.s.indexer.rebuildFromBolt(cfg, bucket, n); err != nil {
+	coverage, err := n.s.indexer.rebuildFromBolt(cfg, bucket, n)
+	if err != nil {
+		return err
+	}
+	meta, err := newMeta(bucket, n)
+	if err != nil {
+		return err
+	}
+	if err := meta.setIndexCoverage(coverage); err != nil {
 		return err
 	}
 
@@ -191,11 +204,9 @@ func (n *node) reIndexBucket(tx *bolt.Tx, bucket *bolt.Bucket, cfg *structConfig
 			lastID = append(lastID[:0], k...)
 		}
 		if lastID != nil {
-			meta, err := newMeta(bucket, n)
-			if err != nil {
+			if err := meta.setIncrement(cfg.ID, lastID); err != nil {
 				return err
 			}
-			return meta.setIncrement(cfg.ID, lastID)
 		}
 	}
 	return nil
@@ -366,6 +377,11 @@ func (n *node) save(tx *bolt.Tx, cfg *structConfig, data any, update bool, uniqu
 	if err := meta.ensureSchema(cfg); err != nil {
 		return nil, err
 	}
+	if _, ok := meta.indexCoverage(); !ok && !bucketHasRawRecords(bucket) {
+		if err := meta.initializeIndexCoverage(cfg); err != nil {
+			return nil, err
+		}
+	}
 
 	if cfg.ID.IsZero {
 		err = meta.increment(cfg.ID)
@@ -414,8 +430,15 @@ func (n *node) save(tx *bolt.Tx, cfg *structConfig, data any, update bool, uniqu
 	if err != nil {
 		return nil, err
 	}
+	oldRaw := bucket.Get(id)
+	if oldRaw != nil {
+		oldRaw = append([]byte(nil), oldRaw...)
+	}
 
 	if err := bucket.Put(id, raw); err != nil {
+		return nil, err
+	}
+	if err := meta.updateIndexCoverageAfterSave(cfg, oldRaw); err != nil {
 		return nil, err
 	}
 
@@ -662,6 +685,13 @@ func (n *node) deleteStruct(tx *bolt.Tx, cfg *structConfig, id []byte) error {
 	raw := bucket.Get(id)
 	if raw == nil {
 		return ErrNotFound
+	}
+	meta, err := newMeta(bucket, n)
+	if err != nil {
+		return err
+	}
+	if err := meta.updateIndexCoverageAfterDelete(cfg, raw); err != nil {
+		return err
 	}
 
 	if err := bucket.Delete(id); err != nil {

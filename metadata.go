@@ -1,6 +1,7 @@
 package storm
 
 import (
+	"bytes"
 	"encoding/json"
 	"reflect"
 	"sort"
@@ -9,8 +10,9 @@ import (
 )
 
 const (
-	metaCodec  = "codec"
-	metaSchema = "schema"
+	metaCodec         = "codec"
+	metaSchema        = "schema"
+	metaIndexCoverage = "index_coverage"
 )
 
 func newMeta(b *bolt.Bucket, n Node) (*meta, error) {
@@ -63,13 +65,26 @@ type storedSchemaField struct {
 	Composites     map[string]int `json:"composites,omitempty"`
 }
 
+// indexCoverage records the table rows and non-zero indexed values represented
+// by the external index. Its absence means sorted index reads must fall back.
+type indexCoverage struct {
+	Records uint64            `json:"records"`
+	Fields  map[string]uint64 `json:"fields"`
+}
+
 // setStoredSchema persists a complete table schema as metadata.
 func (m *meta) setStoredSchema(schema storedSchema) error {
 	raw, err := json.Marshal(schema)
 	if err != nil {
 		return err
 	}
-	return m.bucket.Put([]byte(metaSchema), raw)
+	if bytes.Equal(m.bucket.Get([]byte(metaSchema)), raw) {
+		return nil
+	}
+	if err := m.bucket.Put([]byte(metaSchema), raw); err != nil {
+		return err
+	}
+	return m.invalidateIndexCoverage()
 }
 
 // setSchema persists enough struct metadata for SQL map/DTO queries without registration.
@@ -83,6 +98,199 @@ func (m *meta) ensureSchema(cfg *structConfig) error {
 		return nil
 	}
 	return m.setSchema(cfg)
+}
+
+// hasSchema reports whether this metadata bucket belongs to a Storm table.
+func (m *meta) hasSchema() bool {
+	return m != nil && m.bucket != nil && m.bucket.Get([]byte(metaSchema)) != nil
+}
+
+// indexCoverage returns a valid coverage snapshot when one has been rebuilt or
+// incrementally maintained by Storm writes.
+func (m *meta) indexCoverage() (*indexCoverage, bool) {
+	if m == nil || m.bucket == nil {
+		return nil, false
+	}
+	raw := m.bucket.Get([]byte(metaIndexCoverage))
+	if raw == nil {
+		return nil, false
+	}
+	coverage := &indexCoverage{}
+	if err := json.Unmarshal(raw, coverage); err != nil || coverage.Fields == nil {
+		return nil, false
+	}
+	return coverage, true
+}
+
+// setIndexCoverage persists one complete coverage snapshot inside the table's
+// Bolt transaction so it changes atomically with the primary records.
+func (m *meta) setIndexCoverage(coverage *indexCoverage) error {
+	if coverage == nil {
+		return m.invalidateIndexCoverage()
+	}
+	if coverage.Fields == nil {
+		coverage.Fields = make(map[string]uint64)
+	}
+	raw, err := json.Marshal(coverage)
+	if err != nil {
+		return err
+	}
+	return m.bucket.Put([]byte(metaIndexCoverage), raw)
+}
+
+// invalidateIndexCoverage disables sorted index reads after an unmanaged write
+// or schema change until ReIndex can establish a new complete snapshot.
+func (m *meta) invalidateIndexCoverage() error {
+	if m == nil || m.bucket == nil {
+		return nil
+	}
+	return m.bucket.Delete([]byte(metaIndexCoverage))
+}
+
+// initializeIndexCoverage marks an empty table as fully covered so subsequent
+// normal Save calls can maintain exact counts without an initial ReIndex.
+func (m *meta) initializeIndexCoverage(cfg *structConfig) error {
+	return m.setIndexCoverage(newIndexCoverage(cfg))
+}
+
+// newIndexCoverage allocates counters for standalone fields that can supply a
+// raw SQL sort order; composite-only fields are intentionally excluded.
+func newIndexCoverage(cfg *structConfig) *indexCoverage {
+	coverage := &indexCoverage{Fields: make(map[string]uint64)}
+	if cfg == nil {
+		return coverage
+	}
+	for name, field := range cfg.Fields {
+		if field != nil && field.Index != "" {
+			coverage.Fields[name] = 0
+		}
+	}
+	return coverage
+}
+
+// addRecord accumulates one decoded primary record while an index is rebuilt.
+func (coverage *indexCoverage) addRecord(cfg *structConfig, record reflect.Value) {
+	if coverage == nil || cfg == nil {
+		return
+	}
+	coverage.Records++
+	for name := range coverage.Fields {
+		value := record.FieldByName(name)
+		if value.IsValid() && !isZero(&value) {
+			coverage.Fields[name]++
+		}
+	}
+}
+
+// updateIndexCoverageAfterSave applies a primary-record replacement to a
+// maintained snapshot. Invalid or unreadable old data disables the optimization.
+func (m *meta) updateIndexCoverageAfterSave(cfg *structConfig, oldRaw []byte) error {
+	coverage, ok := m.indexCoverage()
+	if !ok {
+		return nil
+	}
+	oldFields, err := indexedFieldPresence(cfg, oldRaw, m.node.Codec())
+	if err != nil {
+		return m.invalidateIndexCoverage()
+	}
+	newFields := indexedFieldPresenceFromConfig(cfg)
+	if oldRaw == nil {
+		coverage.Records++
+	}
+	for name := range coverage.Fields {
+		oldPresent := oldFields[name]
+		newPresent := newFields[name]
+		switch {
+		case oldPresent && !newPresent:
+			if coverage.Fields[name] == 0 {
+				return m.invalidateIndexCoverage()
+			}
+			coverage.Fields[name]--
+		case !oldPresent && newPresent:
+			coverage.Fields[name]++
+		}
+	}
+	return m.setIndexCoverage(coverage)
+}
+
+// updateIndexCoverageAfterDelete removes one record from a maintained snapshot.
+func (m *meta) updateIndexCoverageAfterDelete(cfg *structConfig, raw []byte) error {
+	coverage, ok := m.indexCoverage()
+	if !ok {
+		return nil
+	}
+	fields, err := indexedFieldPresence(cfg, raw, m.node.Codec())
+	if err != nil || coverage.Records == 0 {
+		return m.invalidateIndexCoverage()
+	}
+	coverage.Records--
+	for name, present := range fields {
+		if !present {
+			continue
+		}
+		if coverage.Fields[name] == 0 {
+			return m.invalidateIndexCoverage()
+		}
+		coverage.Fields[name]--
+	}
+	return m.setIndexCoverage(coverage)
+}
+
+// indexedFieldPresenceFromConfig reports the current values that Bleve would
+// retain for standalone indexed fields without decoding the newly saved record.
+func indexedFieldPresenceFromConfig(cfg *structConfig) map[string]bool {
+	present := make(map[string]bool)
+	if cfg == nil {
+		return present
+	}
+	for name, field := range cfg.Fields {
+		if field == nil || field.Index == "" || field.Value == nil || !field.Value.IsValid() {
+			continue
+		}
+		present[name] = !isZero(field.Value)
+	}
+	return present
+}
+
+// indexedFieldPresence decodes an existing record so replacement and delete
+// operations can update coverage with the same zero-value rule as Bleve.
+func indexedFieldPresence(cfg *structConfig, raw []byte, c interface{ Unmarshal([]byte, any) error }) (map[string]bool, error) {
+	present := make(map[string]bool)
+	if cfg == nil || raw == nil {
+		return present, nil
+	}
+	if cfg.Type == nil {
+		return nil, ErrBadType
+	}
+	record := reflect.New(cfg.Type)
+	if err := c.Unmarshal(raw, record.Interface()); err != nil {
+		return nil, err
+	}
+	for name, field := range cfg.Fields {
+		if field == nil || field.Index == "" {
+			continue
+		}
+		value := record.Elem().FieldByName(name)
+		if value.IsValid() {
+			present[name] = !isZero(&value)
+		}
+	}
+	return present, nil
+}
+
+// bucketHasRawRecords stops at the first primary value so new tables can begin
+// coverage tracking without treating legacy records as already indexed.
+func bucketHasRawRecords(bucket *bolt.Bucket) bool {
+	if bucket == nil {
+		return false
+	}
+	cursor := bucket.Cursor()
+	for key, raw := cursor.First(); key != nil; key, raw = cursor.Next() {
+		if raw != nil && !bytes.Equal(key, []byte(metadataBucket)) {
+			return true
+		}
+	}
+	return false
 }
 
 func readStoredSchema(bucket *bolt.Bucket) (*storedSchema, error) {

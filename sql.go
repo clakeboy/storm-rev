@@ -481,6 +481,9 @@ func (s *SQL) selectRawRecords(plan *sqlSelectPlan) ([]sqlRawRecord, error) {
 	if records, used, err := s.selectRawRecordsByIDCursor(plan); used || err != nil {
 		return records, err
 	}
+	if records, used, err := s.selectRawRecordsByIndexedOrder(plan); used || err != nil {
+		return records, err
+	}
 
 	var records []sqlRawRecord
 	err := s.node.readTx(func(tx *bolt.Tx) error {
@@ -558,6 +561,51 @@ func (s *SQL) selectRawRecordsByIDCursor(plan *sqlSelectPlan) ([]sqlRawRecord, b
 	return records, true, err
 }
 
+// selectRawRecordsByIndexedOrder reads one Bleve-sorted page when coverage
+// metadata proves its order is equivalent to the metadata raw SQL sorter.
+func (s *SQL) selectRawRecordsByIndexedOrder(plan *sqlSelectPlan) ([]sqlRawRecord, bool, error) {
+	field, ok := plan.rawIndexedOrderField()
+	if !ok {
+		return nil, false, nil
+	}
+	if plan.limit == 0 {
+		return nil, true, nil
+	}
+
+	var records []sqlRawRecord
+	used := false
+	err := s.node.readTx(func(tx *bolt.Tx) error {
+		bucket := s.node.GetBucket(tx, plan.model.table)
+		if bucket == nil {
+			return nil
+		}
+		metaBucket := bucket.Bucket([]byte(metadataBucket))
+		if metaBucket == nil {
+			return nil
+		}
+		coverage, ok := (&meta{node: s.node, bucket: metaBucket}).indexCoverage()
+		if !ok {
+			return nil
+		}
+		ids, ok := s.node.s.indexer.searchSortedByIndex(plan.model.cfg, field.Name, coverage, plan.reverse, plan.limit, plan.skip)
+		if !ok {
+			return nil
+		}
+		for _, id := range ids {
+			raw := bucket.Get(id)
+			if raw == nil {
+				s.node.s.indexer.markDirty(plan.model.cfg.Name)
+				records = nil
+				return nil
+			}
+			records = append(records, sqlRawRecord{raw: append([]byte(nil), raw...)})
+		}
+		used = true
+		return nil
+	})
+	return records, used, err
+}
+
 // canUseRawIDCursorOrder is intentionally strict: it only allows SQL shapes
 // where reading the main bucket cursor is equivalent to ORDER BY id.
 func (plan *sqlSelectPlan) canUseRawIDCursorOrder() bool {
@@ -575,6 +623,22 @@ func (plan *sqlSelectPlan) canUseRawIDCursorOrder() bool {
 	return plan.model.idFieldUsesBoltKeyOrder(idField)
 }
 
+// rawIndexedOrderField limits the external-sort path to SQL forms whose
+// one-field Bleve order matches compareRawJSON without filtering rows.
+func (plan *sqlSelectPlan) rawIndexedOrderField() (*fieldConfig, bool) {
+	if plan == nil || plan.model == nil || !plan.model.metadataOnly() {
+		return nil, false
+	}
+	if !plan.whereEmpty || plan.limit < 0 || len(plan.orderBy) != 1 {
+		return nil, false
+	}
+	field, ok := plan.model.lookupField(plan.orderBy[0])
+	if !ok || field.IsID || field.Index == "" {
+		return nil, false
+	}
+	return field, plan.model.indexFieldUsesRawOrder(field)
+}
+
 // idFieldUsesBoltKeyOrder guards against changing SQL sort semantics for ID
 // types whose JSON value order does not match their stored Bolt key order.
 func (m *sqlModel) idFieldUsesBoltKeyOrder(field *fieldConfig) bool {
@@ -589,6 +653,25 @@ func (m *sqlModel) idFieldUsesBoltKeyOrder(field *fieldConfig) bool {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
 		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		return field.IsInteger && field.Increment && field.IncrementStart >= 0
+	default:
+		return false
+	}
+}
+
+// indexFieldUsesRawOrder excludes types whose Bleve value order differs from
+// metadata raw JSON comparison, notably time values serialized as strings.
+func (m *sqlModel) indexFieldUsesRawOrder(field *fieldConfig) bool {
+	typ := m.fieldType(field)
+	if typ == nil {
+		return false
+	}
+	typ = derefType(typ)
+	switch typ.Kind() {
+	case reflect.String, reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
+		return true
 	default:
 		return false
 	}
@@ -1417,7 +1500,15 @@ func (s *SQL) deleteMetadataRecords(model *sqlModel, matcher q.Matcher) (SQLResu
 		if bucket == nil {
 			return nil
 		}
-		var keys [][]byte
+		meta, err := newMeta(bucket, s.node)
+		if err != nil {
+			return err
+		}
+		type rawDelete struct {
+			key []byte
+			raw []byte
+		}
+		var deletes []rawDelete
 		cursor := bucket.Cursor()
 		for key, raw := cursor.First(); key != nil; key, raw = cursor.Next() {
 			if raw == nil || bytes.Equal(key, []byte(metadataBucket)) {
@@ -1428,16 +1519,22 @@ func (s *SQL) deleteMetadataRecords(model *sqlModel, matcher q.Matcher) (SQLResu
 				return err
 			}
 			if ok {
-				keys = append(keys, append([]byte(nil), key...))
+				deletes = append(deletes, rawDelete{
+					key: append([]byte(nil), key...),
+					raw: append([]byte(nil), raw...),
+				})
 			}
 		}
-		for _, key := range keys {
-			if err := bucket.Delete(key); err != nil {
+		for _, deleted := range deletes {
+			if err := meta.updateIndexCoverageAfterDelete(model.cfg, deleted.raw); err != nil {
+				return err
+			}
+			if err := bucket.Delete(deleted.key); err != nil {
 				return err
 			}
 			record := &deletedRecord{
 				cfg: model.cfg,
-				id:  append([]byte(nil), key...),
+				id:  append([]byte(nil), deleted.key...),
 			}
 			if s.node.tx != nil {
 				s.node.markTxIndexDelete(record)

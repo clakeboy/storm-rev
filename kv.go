@@ -79,10 +79,16 @@ func (n *node) setBytes(tx *bolt.Tx, bucketName string, id, data []byte) error {
 		return err
 	}
 
-	// save node configuration in the bucket
-	_, err = newMeta(bucket, n)
+	// Save node configuration in the bucket. Raw KV writes do not maintain
+	// external indexes, so they disable metadata SQL sorted-index reads.
+	meta, err := newMeta(bucket, n)
 	if err != nil {
 		return err
+	}
+	if meta.hasSchema() {
+		if err := meta.invalidateIndexCoverage(); err != nil {
+			return err
+		}
 	}
 
 	return bucket.Put(id, data)
@@ -141,6 +147,13 @@ func (n *node) delete(tx *bolt.Tx, bucketName string, id []byte) error {
 	bucket := n.GetBucket(tx, bucketName)
 	if bucket == nil {
 		return ErrNotFound
+	}
+	metaBucket := bucket.Bucket([]byte(metadataBucket))
+	if metaBucket != nil && metaBucket.Get([]byte(metaSchema)) != nil {
+		meta := &meta{node: n, bucket: metaBucket}
+		if err := meta.invalidateIndexCoverage(); err != nil {
+			return err
+		}
 	}
 
 	return bucket.Delete(id)

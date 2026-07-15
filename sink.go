@@ -505,8 +505,16 @@ func (d *deleteSink) add(i *item) error {
 		return ErrBadType
 	}
 
-	if raw := i.bucket.Get(i.k); raw == nil {
+	raw := i.bucket.Get(i.k)
+	if raw == nil {
 		return ErrNotFound
+	}
+	meta, err := newMeta(i.bucket, n)
+	if err != nil {
+		return err
+	}
+	if err := meta.updateIndexCoverageAfterDelete(d.cfg, raw); err != nil {
+		return err
 	}
 	if err := i.bucket.Delete(i.k); err != nil {
 		return err
