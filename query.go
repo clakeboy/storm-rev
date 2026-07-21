@@ -123,14 +123,25 @@ func (q *query) Delete(kind any) error {
 		return err
 	}
 
-	if err := q.runQuery(sink); err != nil {
+	if q.node.tx != nil {
+		return q.runQuery(sink)
+	}
+
+	q.node.s.indexCommitMu.Lock()
+	var job *durableIndexJob
+	err = q.node.s.Bolt.Update(func(tx *bolt.Tx) error {
+		if err := q.query(tx, sink); err != nil {
+			return err
+		}
+		var err error
+		job, err = persistDurableIndexJob(tx, q.node.rootBucket, nil, sink.records, nil)
+		return err
+	})
+	if err != nil {
+		q.node.s.indexCommitMu.Unlock()
 		return err
 	}
-	if q.node.tx != nil {
-		return nil
-	}
-	// Bolt has committed here, so external indexes can be updated in one batch.
-	return q.node.deleteIndexedRecords(sink.records)
+	return q.node.submitCommittedDurableIndexJob(job)
 }
 
 func (q *query) Count(kind any) (int, error) {

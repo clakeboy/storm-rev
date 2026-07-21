@@ -1,6 +1,7 @@
 package storm
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
@@ -95,6 +96,7 @@ func prepareSelectIndexedScoreDB(t *testing.T) (*DB, func()) {
 		})
 		require.NoError(t, err)
 	}
+	require.NoError(t, db.FlushBleve(context.Background()))
 	return db, cleanup
 }
 
@@ -160,6 +162,7 @@ func TestSelectDeleteUpdatesIndexFromCandidates(t *testing.T) {
 
 	err := db.Select(q.Eq("Value", 5)).Delete(&selectIndexedScore{})
 	require.NoError(t, err)
+	require.NoError(t, db.FlushBleve(context.Background()))
 	require.False(t, db.indexer.isDirty("selectIndexedScore"))
 
 	var scores []selectIndexedScore

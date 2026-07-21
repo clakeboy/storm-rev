@@ -280,9 +280,13 @@ Storm-rev 把数据保存在 BoltDB 中，把索引作为可重建的外部 Blev
 
 BoltDB 始终是事实数据源。Bleve 索引是可重建的派生数据，可以随时从 BoltDB 重新生成。索引文档会保存索引字段的精确匹配 token、用于范围/前缀扫描的类型化值、字段存在标记、全文字段，以及复合索引标记。
 
-写入会先落到 BoltDB，再更新外部索引。`SaveAll` 会按表分组，并通过 Bleve batch 批量写入每个表的索引。删除也会从 Bleve 中移除；事务中的保存和删除会在 `Commit` 之后批量同步到 Bleve。
+涉及索引的写入会在修改记录的同一个 BoltDB 事务中追加一条持久化、全局有序的 outbox 记录。事务提交后，由单个有界协调器把并发任务合并成 Bleve batch。这样 Bleve 工作不会占用 Bolt 写锁，大量并发 `Update` 也不会同时制造无界的 segment；进程异常退出后，下一次打开数据库会继续重放已提交但尚未写入 Bleve 的任务。未修改索引字段的 `Update` 会完全跳过 Bleve。
 
-如果索引命中的记录在 BoltDB 中不存在，或者索引更新失败，对应表索引会被标记为 dirty。dirty 索引不会再被索引查询计划信任，可以通过 `ReIndex` 从 BoltDB 全量重建。
+默认改为异步索引语义：写 API 在 Bolt 事务和持久化 outbox 提交后即可返回。需要明确等待索引可见时调用 `FlushBleve(ctx)`；如果要求每次写调用都等待 Bleve 并直接返回 Bleve 错误，使用 `BleveSyncWrites()` 打开数据库。协调器队列有容量上限，因此 Bleve 长时间跟不上时，异步写入仍会受到背压。`BleveAsyncWrites()` 仍可用于显式声明默认行为。
+
+如果索引命中的记录在 BoltDB 中不存在，或者索引更新失败，对应表索引会被标记为 dirty，索引查询会安全回退到 Bolt 扫描。失败的 outbox 会严格按顺序重试；连续失败会自动触发全量重建。outbox 和 dirty 状态都可跨重启恢复，也可以显式调用 `ReIndex`。
+
+`ReIndex` 使用 Bolt 只读快照，把数据分批写入临时 Bleve 索引，再原子切换索引目录；重建期间不会长期占用 Bolt 写锁。快照期间提交的索引变更会保留在 outbox 中，并在切换后继续重放。
 
 ## 高级查询
 
@@ -461,9 +465,34 @@ if err != nil {
 return tx.Commit()
 ```
 
-打开事务内的查询会直接读取 BoltDB，并回退到扫描而不是信任外部索引，因此可以看到事务内尚未提交的变更。`Commit` 时会先处理待删除的索引目录，再重建 dirty 表，最后把待删除和待保存的记录批量同步到 Bleve。`Rollback` 会同时丢弃 BoltDB 变更和待执行的外部索引操作。
+打开事务内的查询会直接读取 BoltDB，并回退到扫描而不是信任外部索引，因此可以看到事务内尚未提交的变更。`Commit` 会把索引变更和业务数据写入同一个 Bolt 事务中的持久化 outbox，提交后再批量同步到 Bleve；显式要求重建的表随后使用只读快照重建。`Rollback` 会同时丢弃 BoltDB 变更和对应的 outbox 操作。
+
+可写事务会先取得索引提交顺序锁，再打开 Bolt 写事务；`Commit`、`Rollback` 和失败的 `Begin(true)` 都会释放该锁。这样普通并发 `Save` 不会一边持有索引锁、一边等待显式事务占用的 Bolt writer，从根源上消除两者的锁顺序死锁。
 
 ## 配置选项
+
+### Bleve 写入模式
+
+默认使用异步索引模式：
+
+```go
+db, err := storm.Open("my.db")
+if err != nil {
+  return err
+}
+
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+err = db.FlushBleve(ctx)
+```
+
+`FlushBleve` 会等待持久化 outbox 和内存协调器队列都清空。`Close` 也会排空正常任务；仍然失败的任务会保留在 Bolt outbox 中，并在下次 `Open` 时恢复。
+
+只有在写调用必须等待索引可见，或者需要直接获得 Bleve 写入错误时，才使用同步模式：
+
+```go
+db, err := storm.Open("my.db", storm.BleveSyncWrites())
+```
 
 ### BoltOptions
 

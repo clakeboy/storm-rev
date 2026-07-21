@@ -1,6 +1,7 @@
 package storm
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -436,6 +437,7 @@ func TestSelectDelete(t *testing.T) {
 
 	err = db.Select(q.Gte("ID", 5)).Delete(&User{})
 	require.NoError(t, err)
+	require.NoError(t, db.FlushBleve(context.Background()))
 	require.False(t, db.indexer.isDirty("User"))
 
 	var user User

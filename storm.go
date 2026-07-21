@@ -3,6 +3,7 @@ package storm
 import (
 	"bytes"
 	"encoding/binary"
+	"sync"
 	"time"
 
 	"github.com/clakeboy/storm-rev/v2/codec"
@@ -22,7 +23,7 @@ var defaultCodec = json.Sonic
 func Open(path string, stormOptions ...func(*Options) error) (*DB, error) {
 	var err error
 
-	var opts Options
+	opts := Options{bleveAsyncWrites: true}
 	for _, option := range stormOptions {
 		if err = option(&opts); err != nil {
 			return nil, err
@@ -30,7 +31,8 @@ func Open(path string, stormOptions ...func(*Options) error) (*DB, error) {
 	}
 
 	s := DB{
-		Bolt: opts.bolt,
+		Bolt:       opts.bolt,
+		bleveAsync: opts.bleveAsyncWrites,
 	}
 
 	n := node{
@@ -65,12 +67,18 @@ func Open(path string, stormOptions ...func(*Options) error) (*DB, error) {
 			return nil, err
 		}
 	}
-	s.indexer = newBleveIndexManager(opts.path, n.codec)
-
-	err = s.checkVersion()
+	s.indexer, err = newBleveIndexManager(opts.path, n.codec, &opts, s.Bolt)
 	if err != nil {
 		return nil, err
 	}
+	s.indexer.repair = n.reindexDurableTargets
+
+	err = s.checkVersion()
+	if err != nil {
+		_ = s.indexer.close()
+		return nil, err
+	}
+	s.indexer.startRecovery()
 
 	return &s, nil
 }
@@ -84,7 +92,13 @@ type DB struct {
 	// Bolt is still easily accessible
 	Bolt *bolt.DB
 
-	indexer *bleveIndexManager
+	indexer    *bleveIndexManager
+	bleveAsync bool
+
+	// indexCommitMu serializes the short commit-and-enqueue boundary for indexed
+	// writes. It is released before callers wait for Bleve, so the Bolt writer is
+	// never held by segment persistence while request order remains deterministic.
+	indexCommitMu sync.Mutex
 }
 
 // Close the database

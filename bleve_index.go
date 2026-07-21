@@ -3,6 +3,7 @@ package storm
 import (
 	"bytes"
 	"encoding/base64"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -38,20 +39,127 @@ const (
 type bleveIndexManager struct {
 	root  string
 	codec codec.MarshalUnmarshaler
+	db    *bolt.DB
 
 	mu      sync.Mutex
 	indexes map[string]bleve.Index
 	dirty   map[string]bool
+	pending map[string]int
+
+	// writeMu keeps Bleve segment creation, rebuilds, and drops from running
+	// concurrently. Scorch already serializes parts of this work internally,
+	// but an explicit gate prevents high-rate callers from creating a segment
+	// storm faster than its merger can recover.
+	writeMu sync.Mutex
+	// lifecycleMu lets searches continue during normal batches while preventing
+	// an index close/swap from racing an active reader.
+	lifecycleMu sync.RWMutex
+
+	queueMu       sync.RWMutex
+	queueClosed   bool
+	indexRequests chan *bleveIndexRequest
+	indexWG       sync.WaitGroup
+	batchDelay    time.Duration
+	batchMaxDocs  int
+	batchMaxBytes uint64
+	closing       chan struct{}
+	closeOnce     sync.Once
+
+	outboxMu     sync.Mutex
+	inFlight     map[uint64]*bleveIndexRequest
+	recoveryWG   sync.WaitGroup
+	recoveryDone chan struct{}
+	recoveryJobs []*durableIndexJob
+	recoveryOnce sync.Once
+	repair       func(targets []durableReindexTarget, through uint64) error
+
+	// batchObserver is a test seam for verifying group-commit behavior.
+	batchObserver   func(tableName string, docs int, bytes uint64)
+	batchError      func(tableName string, docs int, bytes uint64) error
+	rebuildObserver func(tableName string)
+	requestObserver func(requests []*bleveIndexRequest)
 }
 
 // newBleveIndexManager builds the external index manager rooted next to the Bolt DB file.
-func newBleveIndexManager(dbPath string, c codec.MarshalUnmarshaler) *bleveIndexManager {
-	return &bleveIndexManager{
-		root:    indexRootDir(dbPath),
-		codec:   c,
-		indexes: make(map[string]bleve.Index),
-		dirty:   make(map[string]bool),
+func newBleveIndexManager(dbPath string, c codec.MarshalUnmarshaler, opts *Options, db *bolt.DB) (*bleveIndexManager, error) {
+	delay := defaultBleveBatchDelay
+	maxDocs := defaultBleveBatchMaxDocs
+	maxBytes := uint64(defaultBleveBatchMaxBytes)
+	queueSize := defaultBleveBatchQueueSize
+	if opts != nil {
+		if opts.bleveBatchDelay > 0 {
+			delay = opts.bleveBatchDelay
+		}
+		if opts.bleveBatchMaxDocs > 0 {
+			maxDocs = opts.bleveBatchMaxDocs
+		}
+		if opts.bleveBatchMaxBytes > 0 {
+			maxBytes = opts.bleveBatchMaxBytes
+		}
+		if opts.bleveBatchQueueSize > 0 {
+			queueSize = opts.bleveBatchQueueSize
+		}
 	}
+
+	m := &bleveIndexManager{
+		root:          indexRootDir(dbPath),
+		codec:         c,
+		db:            db,
+		indexes:       make(map[string]bleve.Index),
+		dirty:         make(map[string]bool),
+		pending:       make(map[string]int),
+		indexRequests: make(chan *bleveIndexRequest, queueSize),
+		batchDelay:    delay,
+		batchMaxDocs:  maxDocs,
+		batchMaxBytes: maxBytes,
+		closing:       make(chan struct{}),
+		inFlight:      make(map[uint64]*bleveIndexRequest),
+		recoveryDone:  make(chan struct{}),
+	}
+	m.indexWG.Add(1)
+	go m.runIndexCoordinator()
+
+	jobs, states, err := loadDurableIndexJobs(db)
+	if err != nil {
+		m.stopIndexCoordinator()
+		return nil, err
+	}
+	for table, state := range states {
+		if state.Dirty || state.Applied < state.Desired {
+			m.dirty[table] = true
+		}
+	}
+	m.recoveryJobs = jobs
+	return m, nil
+}
+
+// startRecovery queues pre-existing outbox jobs before allowing newly committed
+// jobs to enter the coordinator. This preserves global sequence order across a
+// process restart without making Open wait for Bleve persistence.
+func (m *bleveIndexManager) startRecovery() {
+	if m == nil {
+		return
+	}
+	m.recoveryOnce.Do(func() {
+		if len(m.recoveryJobs) == 0 {
+			close(m.recoveryDone)
+			return
+		}
+		m.recoveryWG.Add(1)
+		go func(jobs []*durableIndexJob) {
+			defer m.recoveryWG.Done()
+			defer close(m.recoveryDone)
+			for _, job := range jobs {
+				select {
+				case <-m.closing:
+					return
+				default:
+				}
+				m.submitDurableIndexJobNow(job)
+			}
+		}(append([]*durableIndexJob(nil), m.recoveryJobs...))
+		m.recoveryJobs = nil
+	})
 }
 
 // indexRootDir returns the per-database index root directory.
@@ -65,6 +173,12 @@ func (m *bleveIndexManager) close() error {
 	if m == nil {
 		return nil
 	}
+
+	m.stopIndexCoordinator()
+	m.writeMu.Lock()
+	defer m.writeMu.Unlock()
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -85,6 +199,11 @@ func (m *bleveIndexManager) initTable(cfg *structConfig) error {
 		return nil
 	}
 
+	m.writeMu.Lock()
+	defer m.writeMu.Unlock()
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+
 	_, err := m.tableIndex(cfg)
 	return err
 }
@@ -94,6 +213,11 @@ func (m *bleveIndexManager) dropTable(tableName string) error {
 	if m == nil {
 		return nil
 	}
+
+	m.writeMu.Lock()
+	defer m.writeMu.Unlock()
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -105,6 +229,7 @@ func (m *bleveIndexManager) dropTable(tableName string) error {
 		delete(m.indexes, tableName)
 	}
 	delete(m.dirty, tableName)
+	delete(m.pending, tableName)
 	return os.RemoveAll(m.tablePath(tableName))
 }
 
@@ -138,7 +263,7 @@ func (m *bleveIndexManager) isDirty(tableName string) bool {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.dirty[tableName]
+	return m.dirty[tableName] || m.pending[tableName] > 0
 }
 
 // tableIndex opens an existing index or creates a new one with the current mapping.
@@ -169,39 +294,6 @@ func (m *bleveIndexManager) tableIndex(cfg *structConfig) (bleve.Index, error) {
 	}
 
 	m.indexes[cfg.Name] = idx
-	return idx, nil
-}
-
-// recreateTable drops a table index directory and recreates it with a fresh mapping.
-func (m *bleveIndexManager) recreateTable(cfg *structConfig) (bleve.Index, error) {
-	if m == nil {
-		return nil, nil
-	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if idx := m.indexes[cfg.Name]; idx != nil {
-		if err := idx.Close(); err != nil {
-			return nil, err
-		}
-		delete(m.indexes, cfg.Name)
-	}
-
-	path := m.tablePath(cfg.Name)
-	if err := os.RemoveAll(path); err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(m.root, 0o755); err != nil {
-		return nil, err
-	}
-
-	idx, err := bleve.New(path, buildBleveMapping(cfg))
-	if err != nil {
-		return nil, err
-	}
-	m.indexes[cfg.Name] = idx
-	delete(m.dirty, cfg.Name)
 	return idx, nil
 }
 
@@ -393,18 +485,7 @@ func (m *bleveIndexManager) indexRecord(cfg *structConfig, data any, id []byte) 
 	if m == nil {
 		return nil
 	}
-
-	idx, err := m.tableIndex(cfg)
-	if err != nil {
-		return err
-	}
-
-	doc, err := m.document(cfg, data)
-	if err != nil {
-		return err
-	}
-
-	return idx.Index(encodeDocID(id), doc)
+	return m.submitIndexMutations([]*savedRecord{{cfg: cfg, data: data, id: id}}, nil).wait()
 }
 
 // indexRecords writes a group of records for one table through one Bleve batch.
@@ -412,26 +493,7 @@ func (m *bleveIndexManager) indexRecords(cfg *structConfig, records []*savedReco
 	if m == nil || len(records) == 0 {
 		return nil
 	}
-
-	idx, err := m.tableIndex(cfg)
-	if err != nil {
-		return err
-	}
-
-	batch := idx.NewBatch()
-	for _, record := range records {
-		if record == nil {
-			continue
-		}
-		doc, err := m.document(record.cfg, record.data)
-		if err != nil {
-			return err
-		}
-		if err := batch.Index(encodeDocID(record.id), doc); err != nil {
-			return err
-		}
-	}
-	return idx.Batch(batch)
+	return m.submitIndexMutations(records, nil).wait()
 }
 
 // deleteRecord removes one document from the table index.
@@ -439,12 +501,7 @@ func (m *bleveIndexManager) deleteRecord(cfg *structConfig, id []byte) error {
 	if m == nil {
 		return nil
 	}
-
-	idx, err := m.tableIndex(cfg)
-	if err != nil {
-		return err
-	}
-	return idx.Delete(encodeDocID(id))
+	return m.submitIndexMutations(nil, []*deletedRecord{{cfg: cfg, id: id}}).wait()
 }
 
 // deleteRecords removes a group of records for one table through one Bleve batch.
@@ -452,20 +509,7 @@ func (m *bleveIndexManager) deleteRecords(cfg *structConfig, records []*deletedR
 	if m == nil || len(records) == 0 {
 		return nil
 	}
-
-	idx, err := m.tableIndex(cfg)
-	if err != nil {
-		return err
-	}
-
-	batch := idx.NewBatch()
-	for _, record := range records {
-		if record == nil {
-			continue
-		}
-		batch.Delete(encodeDocID(record.id))
-	}
-	return idx.Batch(batch)
+	return m.submitIndexMutations(nil, records).wait()
 }
 
 // document converts a model value into the small index document Bleve needs.
@@ -551,6 +595,8 @@ func (m *bleveIndexManager) searchSortedByIndex(cfg *structConfig, fieldName str
 	if !ok || fieldCount != coverage.Records {
 		return nil, false
 	}
+	m.lifecycleMu.RLock()
+	defer m.lifecycleMu.RUnlock()
 
 	idx, err := m.tableIndex(cfg)
 	if err != nil {
@@ -647,6 +693,8 @@ func (m *bleveIndexManager) search(cfg *structConfig, query blevequery.Query) ([
 	if m == nil || m.isDirty(cfg.Name) {
 		return nil, index.ErrNotFound
 	}
+	m.lifecycleMu.RLock()
+	defer m.lifecycleMu.RUnlock()
 
 	idx, err := m.tableIndex(cfg)
 	if err != nil {
@@ -702,21 +750,63 @@ func rangeQuery(fieldName string, min, max any) (blevequery.Query, error) {
 	}
 }
 
-// rebuildFromBolt recreates the table index from Bolt records in one batch and
-// returns the matching coverage snapshot from that same decoded record stream.
+// rebuildFromBolt builds a replacement index from a Bolt read snapshot and
+// atomically swaps it into place. The live index remains available until the
+// replacement is complete, and writes queue behind writeMu without holding the
+// Bolt writer lock.
 func (m *bleveIndexManager) rebuildFromBolt(cfg *structConfig, bucket *bolt.Bucket, n *node) (*indexCoverage, error) {
 	coverage := newIndexCoverage(cfg)
 	if m == nil {
 		return coverage, nil
 	}
+	// Rebuild owns the index lifecycle lock for a potentially long snapshot
+	// scan. Mark the table dirty first so unique checks and queries use Bolt
+	// instead of waiting on the old Bleve reader.
+	m.markDirty(cfg.Name)
+	m.writeMu.Lock()
+	defer m.writeMu.Unlock()
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+	if m.rebuildObserver != nil {
+		m.rebuildObserver(cfg.Name)
+	}
 
-	idx, err := m.recreateTable(cfg)
+	tablePath := m.tablePath(cfg.Name)
+	tempPath := fmt.Sprintf("%s.rebuild-%d", tablePath, time.Now().UnixNano())
+	backupPath := tempPath + ".previous"
+	if err := os.RemoveAll(tempPath); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(m.root, 0o755); err != nil {
+		return nil, err
+	}
+	idx, err := bleve.New(tempPath, buildBleveMapping(cfg))
 	if err != nil {
 		m.markDirty(cfg.Name)
 		return nil, err
 	}
+	keepTemp := true
+	indexOpen := true
+	defer func() {
+		if indexOpen {
+			_ = idx.Close()
+		}
+		if keepTemp {
+			_ = os.RemoveAll(tempPath)
+		}
+	}()
 
 	batch := idx.NewBatch()
+	flush := func() error {
+		if batch.Size() == 0 {
+			return nil
+		}
+		if err := idx.Batch(batch); err != nil {
+			return err
+		}
+		batch = idx.NewBatch()
+		return nil
+	}
 	c := bucket.Cursor()
 	for k, raw := c.First(); k != nil; k, raw = c.Next() {
 		if raw == nil || bytes.Equal(k, []byte(metadataBucket)) {
@@ -738,13 +828,63 @@ func (m *bleveIndexManager) rebuildFromBolt(cfg *structConfig, bucket *bolt.Buck
 			return nil, err
 		}
 		coverage.addRecord(cfg, elem.Elem())
+		if (m.batchMaxDocs > 0 && batch.Size() >= m.batchMaxDocs) ||
+			(m.batchMaxBytes > 0 && batch.TotalDocsSize() >= m.batchMaxBytes) {
+			if err := flush(); err != nil {
+				m.markDirty(cfg.Name)
+				return nil, err
+			}
+		}
 	}
 
-	if err := idx.Batch(batch); err != nil {
+	if err := flush(); err != nil {
 		m.markDirty(cfg.Name)
 		return nil, err
 	}
-	m.clearDirty(cfg.Name)
+	if err := idx.Close(); err != nil {
+		m.markDirty(cfg.Name)
+		return nil, err
+	}
+	indexOpen = false
+
+	m.mu.Lock()
+	if current := m.indexes[cfg.Name]; current != nil {
+		if err := current.Close(); err != nil {
+			m.mu.Unlock()
+			m.markDirty(cfg.Name)
+			return nil, err
+		}
+		delete(m.indexes, cfg.Name)
+	}
+	_ = os.RemoveAll(backupPath)
+	if _, err := os.Stat(tablePath); err == nil {
+		if err := os.Rename(tablePath, backupPath); err != nil {
+			m.mu.Unlock()
+			m.markDirty(cfg.Name)
+			return nil, err
+		}
+	}
+	if err := os.Rename(tempPath, tablePath); err != nil {
+		_ = os.Rename(backupPath, tablePath)
+		m.mu.Unlock()
+		m.markDirty(cfg.Name)
+		return nil, err
+	}
+	keepTemp = false
+	replacement, err := bleve.Open(tablePath)
+	if err != nil {
+		_ = os.RemoveAll(tablePath)
+		_ = os.Rename(backupPath, tablePath)
+		if restored, restoreErr := bleve.Open(tablePath); restoreErr == nil {
+			m.indexes[cfg.Name] = restored
+		}
+		m.mu.Unlock()
+		m.markDirty(cfg.Name)
+		return nil, err
+	}
+	m.indexes[cfg.Name] = replacement
+	m.mu.Unlock()
+	_ = os.RemoveAll(backupPath)
 	return coverage, nil
 }
 

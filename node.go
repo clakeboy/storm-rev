@@ -56,6 +56,10 @@ type node struct {
 	// Transaction object. Nil if not in transaction
 	tx *bolt.Tx
 
+	// txState is shared by node copies derived through From/WithCodec so the
+	// explicit transaction's index ordering lock is released exactly once.
+	txState *transactionState
+
 	// Codec of this node
 	codec codec.MarshalUnmarshaler
 
@@ -76,6 +80,10 @@ type node struct {
 
 	// Records deleted inside an open transaction and removed from indexes after commit.
 	txIndexDeletes map[string][]*deletedRecord
+}
+
+type transactionState struct {
+	indexCommitLocked bool
 }
 
 // From returns a new Storm Node with a new bucket root below the current.

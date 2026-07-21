@@ -19,6 +19,11 @@ func Example() {
 	var msgpackDb, _ = storm.Open("msgpack.db", storm.Codec(msgpack.Codec))
 	var serealDb, _ = storm.Open("sereal.db", storm.Codec(sereal.Codec))
 	var protobufDb, _ = storm.Open("protobuf.db", storm.Codec(protobuf.Codec))
+	defer gobDb.Close()
+	defer jsonDb.Close()
+	defer msgpackDb.Close()
+	defer serealDb.Close()
+	defer protobufDb.Close()
 
 	fmt.Printf("%T\n", gobDb.Codec())
 	fmt.Printf("%T\n", jsonDb.Codec())

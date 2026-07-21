@@ -1243,6 +1243,11 @@ func (s *SQL) execMetadataInsert(model *sqlModel, table sqlTableRef, columns sql
 	}
 
 	var saved []*savedRecord
+	var job *durableIndexJob
+	autoIndex := s.node.tx == nil
+	if autoIndex {
+		s.node.s.indexCommitMu.Lock()
+	}
 	err := s.node.readWriteTx(func(tx *bolt.Tx) error {
 		uniqueState := newSaveAllUniqueState(s.node)
 		for _, record := range records {
@@ -1263,13 +1268,21 @@ func (s *SQL) execMetadataInsert(model *sqlModel, table sqlTableRef, columns sql
 				saved = append(saved, savedRecord)
 			}
 		}
+		if autoIndex {
+			var err error
+			job, err = persistDurableIndexJob(tx, s.node.rootBucket, saved, nil, nil)
+			return err
+		}
 		return nil
 	})
 	if err != nil {
+		if autoIndex {
+			s.node.s.indexCommitMu.Unlock()
+		}
 		return SQLResult{}, err
 	}
-	if s.node.tx == nil {
-		if err := s.node.indexSavedRecords(saved); err != nil {
+	if autoIndex {
+		if err := s.node.submitCommittedDurableIndexJob(job); err != nil {
 			return SQLResult{}, err
 		}
 	}
@@ -1319,6 +1332,11 @@ func (s *SQL) execUpdate(stmt *sqlparser.Update, reader *sqlArgReader) (SQLResul
 func (s *SQL) updateRecords(model *sqlModel, matcher q.Matcher, assignments []sqlAssignment) (SQLResult, error) {
 	affected := 0
 	var saved []*savedRecord
+	var job *durableIndexJob
+	autoIndex := s.node.tx == nil
+	if autoIndex {
+		s.node.s.indexCommitMu.Lock()
+	}
 	err := s.node.readWriteTx(func(tx *bolt.Tx) error {
 		sliceType := reflect.SliceOf(reflect.PtrTo(model.typ))
 		slicePtr := reflect.New(sliceType)
@@ -1361,13 +1379,21 @@ func (s *SQL) updateRecords(model *sqlModel, matcher q.Matcher, assignments []sq
 				saved = append(saved, savedRecord)
 			}
 		}
+		if autoIndex {
+			var err error
+			job, err = persistDurableIndexJob(tx, s.node.rootBucket, saved, nil, nil)
+			return err
+		}
 		return nil
 	})
 	if err != nil {
+		if autoIndex {
+			s.node.s.indexCommitMu.Unlock()
+		}
 		return SQLResult{}, err
 	}
-	if s.node.tx == nil {
-		if err := s.node.indexSavedRecords(saved); err != nil {
+	if autoIndex {
+		if err := s.node.submitCommittedDurableIndexJob(job); err != nil {
 			return SQLResult{}, err
 		}
 	}
@@ -1377,6 +1403,11 @@ func (s *SQL) updateRecords(model *sqlModel, matcher q.Matcher, assignments []sq
 func (s *SQL) updateMetadataRecords(model *sqlModel, matcher q.Matcher, assignments []sqlAssignment) (SQLResult, error) {
 	affected := 0
 	var saved []*savedRecord
+	var job *durableIndexJob
+	autoIndex := s.node.tx == nil
+	if autoIndex {
+		s.node.s.indexCommitMu.Lock()
+	}
 	err := s.node.readWriteTx(func(tx *bolt.Tx) error {
 		bucket := s.node.GetBucket(tx, model.table)
 		if bucket == nil {
@@ -1426,13 +1457,21 @@ func (s *SQL) updateMetadataRecords(model *sqlModel, matcher q.Matcher, assignme
 				saved = append(saved, savedRecord)
 			}
 		}
+		if autoIndex {
+			var err error
+			job, err = persistDurableIndexJob(tx, s.node.rootBucket, saved, nil, nil)
+			return err
+		}
 		return nil
 	})
 	if err != nil {
+		if autoIndex {
+			s.node.s.indexCommitMu.Unlock()
+		}
 		return SQLResult{}, err
 	}
-	if s.node.tx == nil {
-		if err := s.node.indexSavedRecords(saved); err != nil {
+	if autoIndex {
+		if err := s.node.submitCommittedDurableIndexJob(job); err != nil {
 			return SQLResult{}, err
 		}
 	}
@@ -1464,6 +1503,11 @@ func (s *SQL) execDelete(stmt *sqlparser.Delete, reader *sqlArgReader) (SQLResul
 func (s *SQL) deleteRecords(model *sqlModel, matcher q.Matcher) (SQLResult, error) {
 	kind := reflect.New(model.typ).Interface()
 	var sink *deleteSink
+	var job *durableIndexJob
+	autoIndex := s.node.tx == nil
+	if autoIndex {
+		s.node.s.indexCommitMu.Lock()
+	}
 	err := s.node.readWriteTx(func(tx *bolt.Tx) error {
 		var err error
 		sink, err = newDeleteSink(s.node, kind)
@@ -1476,16 +1520,27 @@ func (s *SQL) deleteRecords(model *sqlModel, matcher q.Matcher) (SQLResult, erro
 			}
 			return err
 		}
+		if autoIndex {
+			var err error
+			job, err = persistDurableIndexJob(tx, s.node.rootBucket, nil, sink.records, nil)
+			return err
+		}
 		return nil
 	})
 	if err != nil {
+		if autoIndex {
+			s.node.s.indexCommitMu.Unlock()
+		}
 		return SQLResult{}, err
 	}
 	if sink == nil {
+		if autoIndex {
+			s.node.s.indexCommitMu.Unlock()
+		}
 		return SQLResult{}, nil
 	}
-	if s.node.tx == nil {
-		if err := s.node.deleteIndexedRecords(sink.records); err != nil {
+	if autoIndex {
+		if err := s.node.submitCommittedDurableIndexJob(job); err != nil {
 			return SQLResult{}, err
 		}
 	}
@@ -1495,6 +1550,11 @@ func (s *SQL) deleteRecords(model *sqlModel, matcher q.Matcher) (SQLResult, erro
 func (s *SQL) deleteMetadataRecords(model *sqlModel, matcher q.Matcher) (SQLResult, error) {
 	affected := 0
 	var records []*deletedRecord
+	var job *durableIndexJob
+	autoIndex := s.node.tx == nil
+	if autoIndex {
+		s.node.s.indexCommitMu.Lock()
+	}
 	err := s.node.readWriteTx(func(tx *bolt.Tx) error {
 		bucket := s.node.GetBucket(tx, model.table)
 		if bucket == nil {
@@ -1543,13 +1603,21 @@ func (s *SQL) deleteMetadataRecords(model *sqlModel, matcher q.Matcher) (SQLResu
 			}
 			affected++
 		}
+		if autoIndex {
+			var err error
+			job, err = persistDurableIndexJob(tx, s.node.rootBucket, nil, records, nil)
+			return err
+		}
 		return nil
 	})
 	if err != nil {
+		if autoIndex {
+			s.node.s.indexCommitMu.Unlock()
+		}
 		return SQLResult{}, err
 	}
-	if s.node.tx == nil {
-		if err := s.node.deleteIndexedRecords(records); err != nil {
+	if autoIndex {
+		if err := s.node.submitCommittedDurableIndexJob(job); err != nil {
 			return SQLResult{}, err
 		}
 	}

@@ -43,7 +43,7 @@ func TestBleveIndexPath(t *testing.T) {
 	defer os.RemoveAll(dir)
 
 	dbPath := filepath.Join(dir, "storm.db")
-	db, err := Open(dbPath)
+	db, err := Open(dbPath, BleveSyncWrites())
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -61,7 +61,7 @@ func TestBleveIndexPathWithUseDB(t *testing.T) {
 	boltDB, err := bolt.Open(boltPath, 0o600, &bolt.Options{Timeout: time.Second})
 	require.NoError(t, err)
 
-	db, err := Open("ignored.db", UseDB(boltDB))
+	db, err := Open("ignored.db", UseDB(boltDB), BleveSyncWrites())
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -71,7 +71,7 @@ func TestBleveIndexPathWithUseDB(t *testing.T) {
 }
 
 func TestFindByCompositeIndex(t *testing.T) {
-	db, cleanup := createDB(t)
+	db, cleanup := createDB(t, BleveSyncWrites())
 	defer cleanup()
 
 	require.NoError(t, db.Save(&compositeUser{ID: 1, Group: "staff", Age: 20}))
@@ -94,7 +94,7 @@ func TestFindByCompositeIndex(t *testing.T) {
 }
 
 func TestFindByCompositeIndexAfterUpdateAndDelete(t *testing.T) {
-	db, cleanup := createDB(t)
+	db, cleanup := createDB(t, BleveSyncWrites())
 	defer cleanup()
 
 	require.NoError(t, db.Save(&compositeUser{ID: 1, Group: "staff", Age: 20}))
@@ -115,7 +115,7 @@ func TestFindByCompositeIndexAfterUpdateAndDelete(t *testing.T) {
 }
 
 func TestBleveReIndexRebuildsDroppedIndex(t *testing.T) {
-	db, cleanup := createDB(t)
+	db, cleanup := createDB(t, BleveSyncWrites())
 	defer cleanup()
 
 	require.NoError(t, db.Save(&reindexBleveUser{ID: 1, Group: "staff"}))
@@ -136,7 +136,7 @@ func TestBleveExtendsMappingForAddedIndexField(t *testing.T) {
 	defer os.RemoveAll(dir)
 
 	dbPath := filepath.Join(dir, "storm.db")
-	db, err := Open(dbPath)
+	db, err := Open(dbPath, BleveSyncWrites())
 	require.NoError(t, err)
 
 	{
@@ -171,7 +171,7 @@ func TestBleveExtendsMappingForAddedIndexField(t *testing.T) {
 
 	require.NoError(t, db.Close())
 
-	db, err = Open(dbPath)
+	db, err = Open(dbPath, BleveSyncWrites())
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -203,7 +203,7 @@ func TestCompositeIndexTagErrors(t *testing.T) {
 		B  string `storm:"composite=gap:3"`
 	}
 
-	db, cleanup := createDB(t)
+	db, cleanup := createDB(t, BleveSyncWrites())
 	defer cleanup()
 
 	require.Error(t, db.Init(&duplicateOrder{}))
@@ -211,7 +211,7 @@ func TestCompositeIndexTagErrors(t *testing.T) {
 }
 
 func TestFullTextIndexSearch(t *testing.T) {
-	db, cleanup := createDB(t)
+	db, cleanup := createDB(t, BleveSyncWrites())
 	defer cleanup()
 
 	require.NoError(t, db.Save(&fullTextArticle{ID: 1, Title: "Storm brings fast search", Body: "one"}))
@@ -234,7 +234,7 @@ func TestFullTextIndexSearch(t *testing.T) {
 }
 
 func TestFullTextIndexAfterUpdateDeleteAndReIndex(t *testing.T) {
-	db, cleanup := createDB(t)
+	db, cleanup := createDB(t, BleveSyncWrites())
 	defer cleanup()
 
 	require.NoError(t, db.Save(&fullTextArticle{ID: 1, Title: "Bleve supports full text search"}))

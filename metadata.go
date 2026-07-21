@@ -184,7 +184,7 @@ func (coverage *indexCoverage) addRecord(cfg *structConfig, record reflect.Value
 
 // updateIndexCoverageAfterSave applies a primary-record replacement to a
 // maintained snapshot. Invalid or unreadable old data disables the optimization.
-func (m *meta) updateIndexCoverageAfterSave(cfg *structConfig, oldRaw []byte) error {
+func (m *meta) updateIndexCoverageAfterSave(cfg *structConfig, oldRaw, newRaw []byte) error {
 	coverage, ok := m.indexCoverage()
 	if !ok {
 		return nil
@@ -193,7 +193,10 @@ func (m *meta) updateIndexCoverageAfterSave(cfg *structConfig, oldRaw []byte) er
 	if err != nil {
 		return m.invalidateIndexCoverage()
 	}
-	newFields := indexedFieldPresenceFromConfig(cfg)
+	newFields, err := indexedFieldPresence(cfg, newRaw, m.node.Codec())
+	if err != nil {
+		return m.invalidateIndexCoverage()
+	}
 	if oldRaw == nil {
 		coverage.Records++
 	}
@@ -234,22 +237,6 @@ func (m *meta) updateIndexCoverageAfterDelete(cfg *structConfig, raw []byte) err
 		coverage.Fields[name]--
 	}
 	return m.setIndexCoverage(coverage)
-}
-
-// indexedFieldPresenceFromConfig reports the current values that Bleve would
-// retain for standalone indexed fields without decoding the newly saved record.
-func indexedFieldPresenceFromConfig(cfg *structConfig) map[string]bool {
-	present := make(map[string]bool)
-	if cfg == nil {
-		return present
-	}
-	for name, field := range cfg.Fields {
-		if field == nil || field.Index == "" || field.Value == nil || !field.Value.IsValid() {
-			continue
-		}
-		present[name] = !isZero(field.Value)
-	}
-	return present
 }
 
 // indexedFieldPresence decodes an existing record so replacement and delete
@@ -370,6 +357,10 @@ func storedSchemaFromConfig(cfg *structConfig) storedSchema {
 		}
 		if field.Value != nil && field.Value.IsValid() {
 			stored.Type = field.Value.Type().String()
+		} else if cfg.Type != nil {
+			if structField, ok := cfg.Type.FieldByName(field.Name); ok {
+				stored.Type = structField.Type.String()
+			}
 		}
 		schema.Fields = append(schema.Fields, stored)
 	}

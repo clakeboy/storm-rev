@@ -13,10 +13,16 @@ type Tx interface {
 
 // Begin starts a new transaction.
 func (n node) Begin(writable bool) (Node, error) {
-	var err error
+	if writable {
+		n.s.indexCommitMu.Lock()
+		n.txState = &transactionState{indexCommitLocked: true}
+	}
 
+	var err error
 	n.tx, err = n.s.Bolt.Begin(writable)
 	if err != nil {
+		n.releaseTransactionIndexCommitLock()
+		n.txState = nil
 		return nil, err
 	}
 	n.txIndexDirty = make(map[string]*structConfig)
@@ -34,11 +40,9 @@ func (n *node) Rollback() error {
 	}
 
 	err := n.tx.Rollback()
-	n.tx = nil
-	n.txIndexDirty = nil
-	n.txIndexDrops = nil
-	n.txIndexRecords = nil
-	n.txIndexDeletes = nil
+	n.clearTransaction()
+	n.releaseTransactionIndexCommitLock()
+	n.txState = nil
 	// if err == bolt.ErrTxClosed {
 	// 	return ErrNotInTransaction
 	// }
@@ -56,44 +60,74 @@ func (n *node) Commit() error {
 	drops := n.txIndexDrops
 	records := n.txIndexRecords
 	deletes := n.txIndexDeletes
-	err := n.tx.Commit()
+	hasIndexWork := len(dirty) > 0 || len(drops) > 0 || len(records) > 0 || len(deletes) > 0
+
+	var dropNames []string
+	for tableName := range drops {
+		dropNames = append(dropNames, tableName)
+		delete(dirty, tableName)
+		delete(records, tableName)
+		delete(deletes, tableName)
+	}
+	for tableName := range dirty {
+		delete(records, tableName)
+		delete(deletes, tableName)
+	}
+	var pendingRecords []*savedRecord
+	for _, tableRecords := range records {
+		pendingRecords = append(pendingRecords, tableRecords...)
+	}
+	var pendingDeletes []*deletedRecord
+	for _, tableDeletes := range deletes {
+		pendingDeletes = append(pendingDeletes, tableDeletes...)
+	}
+
+	job, err := persistDurableIndexJob(n.tx, n.rootBucket, pendingRecords, pendingDeletes, dropNames)
+	if err != nil {
+		_ = n.tx.Rollback()
+	} else {
+		err = n.tx.Commit()
+	}
+	n.clearTransaction()
+	if err != nil {
+		n.releaseTransactionIndexCommitLock()
+		n.txState = nil
+		return err
+	}
+	if !hasIndexWork {
+		n.releaseTransactionIndexCommitLock()
+		n.txState = nil
+		return nil
+	}
+	req := n.s.indexer.submitDurableIndexJob(job)
+	n.releaseTransactionIndexCommitLock()
+	n.txState = nil
+	if !n.s.bleveAsync {
+		if err := req.wait(); err != nil {
+			return err
+		}
+	}
+	for _, cfg := range dirty {
+		if err := n.ReIndex(reflect.New(cfg.Type).Interface()); err != nil {
+			n.s.indexer.markDirty(cfg.Name)
+			return err
+		}
+	}
+	return nil
+}
+
+func (n *node) releaseTransactionIndexCommitLock() {
+	if n.txState == nil || !n.txState.indexCommitLocked {
+		return
+	}
+	n.txState.indexCommitLocked = false
+	n.s.indexCommitMu.Unlock()
+}
+
+func (n *node) clearTransaction() {
 	n.tx = nil
 	n.txIndexDirty = nil
 	n.txIndexDrops = nil
 	n.txIndexRecords = nil
 	n.txIndexDeletes = nil
-	if err != nil {
-		return err
-	}
-	for tableName := range drops {
-		if err := n.s.indexer.dropTable(tableName); err != nil {
-			return err
-		}
-		delete(dirty, tableName)
-		delete(records, tableName)
-		delete(deletes, tableName)
-	}
-	for tableName, cfg := range dirty {
-		if err := n.ReIndex(reflect.New(cfg.Type).Interface()); err != nil {
-			n.s.indexer.markDirty(cfg.Name)
-			return err
-		}
-		delete(records, tableName)
-		delete(deletes, tableName)
-	}
-	for _, tableDeletes := range deletes {
-		if err := n.deleteIndexedRecords(tableDeletes); err != nil {
-			return err
-		}
-	}
-	for _, tableRecords := range records {
-		if err := n.indexSavedRecords(tableRecords); err != nil {
-			return err
-		}
-	}
-	// if err == bolt.ErrTxClosed {
-	// 	return ErrNotInTransaction
-	// }
-
-	return nil
 }

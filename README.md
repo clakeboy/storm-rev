@@ -383,13 +383,17 @@ Each table gets its own Bleve index directory, for example `/path/app_db_index/U
 
 BoltDB remains the source of truth. Bleve indexes are derived data and can be recreated from BoltDB at any time. The index documents store exact-match tokens, typed values for range/prefix scans, field-existence markers, full-text fields, and composite-index markers for the indexed struct fields.
 
-Writes update the external index after BoltDB accepts the data. `SaveAll` groups records by table and writes each table through one Bleve batch. Deletes are also removed from Bleve, and transactional saves/deletes are applied in batches after `Commit`.
+Indexed writes append a durable, sequence-ordered outbox entry in the same BoltDB transaction as the record change. After that transaction commits, one bounded coordinator combines concurrent work into Bleve batches. This keeps Bleve work outside Bolt's writer lock, prevents concurrent `Update` calls from creating an unbounded segment storm, and lets startup replay any committed index work that was not applied before a crash. Updates that do not change an indexed value skip Bleve entirely.
 
-If an index hit points to a missing Bolt record, or an index update fails, the table index is marked dirty. Dirty indexes are not trusted for indexed query planning; callers can rebuild them with:
+Index writes are asynchronous by default: mutating APIs return after the Bolt transaction and durable outbox commit. Use `FlushBleve(ctx)` when an explicit index-visibility barrier is needed, or open the database with `BleveSyncWrites()` when every mutation must wait for Bleve and report Bleve errors directly. The coordinator queue is bounded, so asynchronous writers can still receive backpressure when Bleve cannot keep up. `BleveAsyncWrites()` remains available as an explicit declaration of the default behavior.
+
+If an index hit points to a missing Bolt record, or an index update fails, the table index is marked dirty and indexed queries safely fall back to Bolt scans. Failed outbox entries are retried in sequence; repeated failures trigger an automatic rebuild. Pending entries and dirty state survive restart. Callers can also rebuild explicitly with:
 
 ```go
 err := db.ReIndex(&User{})
 ```
+
+`ReIndex` reads a Bolt snapshot and builds a temporary Bleve index in bounded batches, then atomically switches the index directory. It does not hold Bolt's writer lock during the rebuild. Indexed writes committed while the snapshot is being rebuilt remain in the outbox and are replayed after the switch.
 
 ### Advanced queries
 
@@ -659,11 +663,36 @@ if err != nil {
 return tx.Commit()
 ```
 
-Queries inside an open transaction read from BoltDB and fall back to scanning instead of trusting external indexes, so they can see uncommitted changes. On `Commit`, pending index drops are applied first, dirty tables are rebuilt, then pending deletes and saves are written to Bleve in batches. `Rollback` discards both the BoltDB changes and the pending external-index work.
+Queries inside an open transaction read from BoltDB and fall back to scanning instead of trusting external indexes, so they can see uncommitted changes. On `Commit`, pending index mutations are written to the durable outbox in the same Bolt transaction and applied after commit; tables explicitly marked for reindexing are then rebuilt from a read snapshot. `Rollback` discards both the BoltDB changes and the corresponding outbox work.
+
+Writable transactions acquire the index commit-order gate before opening the Bolt write transaction. `Commit`, `Rollback`, and a failed `Begin(true)` release that gate, preventing an ordinary concurrent `Save` from holding the index gate while waiting for the explicit transaction's Bolt writer.
 
 ### Options
 
 Storm options are functions that can be passed when constructing you Storm instance. You can pass it any number of options.
+
+#### Bleve write mode
+
+External-index writes are asynchronous by default:
+
+```go
+db, err := storm.Open("my.db")
+if err != nil {
+  return err
+}
+
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+err = db.FlushBleve(ctx)
+```
+
+`FlushBleve` waits for both the durable outbox and the in-memory coordinator queue to drain. `Close` also drains healthy queued work; work that still fails remains in the Bolt outbox and is recovered on the next `Open`.
+
+Use synchronous mode only where the write call itself must wait for Bleve visibility or return a Bleve failure:
+
+```go
+db, err := storm.Open("my.db", storm.BleveSyncWrites())
+```
 
 #### BoltOptions
 

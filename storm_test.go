@@ -37,11 +37,18 @@ func TestNewStorm(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, db.Bolt)
 	require.Equal(t, json.Sonic, db.Codec())
+	require.True(t, db.bleveAsync)
 
 	var v string
 	err = db.Get(dbinfo, "version", &v)
 	require.NoError(t, err)
 	require.Equal(t, Version, v)
+}
+
+func TestBleveSyncWritesOption(t *testing.T) {
+	db, cleanup := createDB(t, BleveSyncWrites())
+	defer cleanup()
+	require.False(t, db.bleveAsync)
 }
 
 func TestNewStormWithStormOptions(t *testing.T) {
@@ -165,7 +172,12 @@ func createDB(t errorHandler, opts ...func(*Options) error) (*DB, func()) {
 	if err != nil {
 		t.Error(err)
 	}
-	db, err := Open(filepath.Join(dir, "storm.db"), opts...)
+	// Most legacy unit tests assert the index immediately after a write. Keep
+	// that fixture deterministic while dedicated tests exercise the public
+	// asynchronous default through Open without BleveSyncWrites.
+	testOpts := []func(*Options) error{BleveSyncWrites()}
+	testOpts = append(testOpts, opts...)
+	db, err := Open(filepath.Join(dir, "storm.db"), testOpts...)
 	if err != nil {
 		t.Error(err)
 	}

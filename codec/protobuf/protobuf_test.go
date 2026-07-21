@@ -20,10 +20,14 @@ func TestProtobuf(t *testing.T) {
 
 func TestSave(t *testing.T) {
 	dir, _ := ioutil.TempDir(os.TempDir(), "storm")
-	defer os.RemoveAll(dir)
-	db, _ := storm.Open(filepath.Join(dir, "storm.db"), storm.Codec(Codec))
+	db, err := storm.Open(filepath.Join(dir, "storm.db"), storm.Codec(Codec))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, db.Close())
+		require.NoError(t, os.RemoveAll(dir))
+	})
 	u1 := SimpleUser{Id: 1, Name: "John"}
-	err := db.Save(&u1)
+	err = db.Save(&u1)
 	require.NoError(t, err)
 	u2 := SimpleUser{}
 	err = db.One("Id", uint64(1), &u2)
@@ -33,9 +37,13 @@ func TestSave(t *testing.T) {
 
 func TestGetSet(t *testing.T) {
 	dir, _ := ioutil.TempDir(os.TempDir(), "storm")
-	defer os.RemoveAll(dir)
-	db, _ := storm.Open(filepath.Join(dir, "storm.db"), storm.Codec(Codec))
-	err := db.Set("bucket", "key", "value")
+	db, err := storm.Open(filepath.Join(dir, "storm.db"), storm.Codec(Codec))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, db.Close())
+		require.NoError(t, os.RemoveAll(dir))
+	})
+	err = db.Set("bucket", "key", "value")
 	require.NoError(t, err)
 	var s string
 	err = db.Get("bucket", "key", &s)

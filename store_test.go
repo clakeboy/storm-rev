@@ -1,6 +1,7 @@
 package storm
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -140,7 +141,7 @@ func TestReIndexUpdatesStoredMetadataFromStruct(t *testing.T) {
 }
 
 func TestReIndexNilUsesStoredMetadata(t *testing.T) {
-	db, cleanup := createDB(t)
+	db, cleanup := createDB(t, BleveSyncWrites())
 	defer cleanup()
 
 	type reindexMetadataUser struct {
@@ -161,7 +162,7 @@ func TestReIndexNilUsesStoredMetadata(t *testing.T) {
 }
 
 func TestReIndexNilUsesStoredMetadataBelowCurrentNode(t *testing.T) {
-	db, cleanup := createDB(t)
+	db, cleanup := createDB(t, BleveSyncWrites())
 	defer cleanup()
 
 	type reindexMetadataIssue struct {
@@ -509,6 +510,203 @@ func TestSaveAllConcurrentWithoutBatch(t *testing.T) {
 			require.True(t, seen[id], "missing ID %d for worker %d", id, workerID)
 		}
 	}
+}
+
+func TestUpdateReleasesBoltWriterBeforeBleveBatch(t *testing.T) {
+	db, cleanup := createDB(t, BleveBatchDelay(time.Millisecond))
+	defer cleanup()
+
+	type CoordinatedUpdateUser struct {
+		ID   int    `storm:"id"`
+		Name string `storm:"index"`
+	}
+
+	require.NoError(t, db.Save(&CoordinatedUpdateUser{ID: 1, Name: "before"}))
+
+	batchStarted := make(chan struct{})
+	releaseBatch := make(chan struct{})
+	var observerOnce sync.Once
+	db.indexer.batchObserver = func(_ string, _ int, _ uint64) {
+		observerOnce.Do(func() {
+			close(batchStarted)
+			<-releaseBatch
+		})
+	}
+	defer func() {
+		select {
+		case <-releaseBatch:
+		default:
+			close(releaseBatch)
+		}
+	}()
+
+	updateDone := make(chan error, 1)
+	go func() {
+		updateDone <- db.UpdateField(&CoordinatedUpdateUser{ID: 1}, "Name", "after")
+	}()
+
+	select {
+	case <-batchStarted:
+	case <-time.After(2 * time.Second):
+		require.FailNow(t, "Bleve batch did not start")
+	}
+
+	// The external index is deliberately blocked above. A raw Bolt write must
+	// still complete because Update released Bolt's writer lock before enqueueing.
+	boltWriteDone := make(chan error, 1)
+	go func() {
+		boltWriteDone <- db.Set("probe", "key", "value")
+	}()
+	select {
+	case err := <-boltWriteDone:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		require.FailNow(t, "Bolt writer remained blocked by Bleve")
+	}
+
+	close(releaseBatch)
+	require.NoError(t, <-updateDone)
+}
+
+func TestConcurrentUpdatesUseBleveGroupCommit(t *testing.T) {
+	db, cleanup := createDB(t, BleveBatchDelay(30*time.Millisecond))
+	defer cleanup()
+
+	type GroupCommitUser struct {
+		ID   int    `storm:"id"`
+		Name string `storm:"index"`
+	}
+
+	const updates = 32
+	users := make([]GroupCommitUser, updates)
+	for i := range users {
+		users[i] = GroupCommitUser{ID: i + 1, Name: fmt.Sprintf("before-%d", i+1)}
+	}
+	require.NoError(t, db.SaveAll(users))
+	require.NoError(t, db.FlushBleve(context.Background()))
+
+	var sizesMu sync.Mutex
+	var batchSizes []int
+	db.indexer.batchObserver = func(_ string, docs int, _ uint64) {
+		sizesMu.Lock()
+		batchSizes = append(batchSizes, docs)
+		sizesMu.Unlock()
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, updates)
+	var wg sync.WaitGroup
+	for i := 0; i < updates; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			<-start
+			errs <- db.UpdateField(&GroupCommitUser{ID: id}, "Name", fmt.Sprintf("after-%d", id))
+		}(i + 1)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	require.NoError(t, db.FlushBleve(context.Background()))
+
+	sizesMu.Lock()
+	observed := append([]int(nil), batchSizes...)
+	sizesMu.Unlock()
+	require.NotEmpty(t, observed)
+	require.Less(t, len(observed), updates, "concurrent updates were not coalesced")
+	total := 0
+	for _, size := range observed {
+		total += size
+	}
+	require.Equal(t, updates, total)
+
+	for id := 1; id <= updates; id++ {
+		var found []GroupCommitUser
+		require.NoError(t, db.Find("Name", fmt.Sprintf("after-%d", id), &found))
+		require.Len(t, found, 1)
+		require.Equal(t, id, found[0].ID)
+	}
+}
+
+func TestConcurrentUpdatesPreserveCommitOrderForSameDocument(t *testing.T) {
+	db, cleanup := createDB(t, BleveBatchDelay(30*time.Millisecond))
+	defer cleanup()
+
+	type OrderedUpdateUser struct {
+		ID   int    `storm:"id"`
+		Name string `storm:"index"`
+	}
+
+	require.NoError(t, db.Save(&OrderedUpdateUser{ID: 1, Name: "before"}))
+	require.NoError(t, db.FlushBleve(context.Background()))
+
+	const updates = 32
+	start := make(chan struct{})
+	errs := make(chan error, updates)
+	var wg sync.WaitGroup
+	for i := 0; i < updates; i++ {
+		wg.Add(1)
+		go func(value int) {
+			defer wg.Done()
+			<-start
+			errs <- db.UpdateField(
+				&OrderedUpdateUser{ID: 1},
+				"Name",
+				fmt.Sprintf("after-%d", value),
+			)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	require.NoError(t, db.FlushBleve(context.Background()))
+
+	// The final Bolt value must be the value indexed by Bleve. This catches an
+	// enqueue-order reversal between two already-committed updates of one ID.
+	var current OrderedUpdateUser
+	require.NoError(t, db.One("ID", 1, &current))
+	require.NotEqual(t, "before", current.Name)
+
+	var indexed []OrderedUpdateUser
+	require.NoError(t, db.Find("Name", current.Name, &indexed))
+	require.Len(t, indexed, 1)
+	require.Equal(t, current, indexed[0])
+}
+
+func TestBleveGroupCommitRespectsDocumentLimit(t *testing.T) {
+	db, cleanup := createDB(t, BleveBatchDelay(time.Millisecond), BleveBatchMaxDocs(3))
+	defer cleanup()
+
+	type BoundedBatchUser struct {
+		ID   int    `storm:"id"`
+		Name string `storm:"index"`
+	}
+
+	var sizesMu sync.Mutex
+	var batchSizes []int
+	db.indexer.batchObserver = func(_ string, docs int, _ uint64) {
+		sizesMu.Lock()
+		batchSizes = append(batchSizes, docs)
+		sizesMu.Unlock()
+	}
+
+	users := make([]BoundedBatchUser, 8)
+	for i := range users {
+		users[i] = BoundedBatchUser{ID: i + 1, Name: fmt.Sprintf("user-%d", i+1)}
+	}
+	require.NoError(t, db.SaveAll(users))
+	require.NoError(t, db.FlushBleve(context.Background()))
+
+	sizesMu.Lock()
+	observed := append([]int(nil), batchSizes...)
+	sizesMu.Unlock()
+	require.Equal(t, []int{3, 3, 2}, observed)
 }
 
 func TestSaveAllIncrement(t *testing.T) {

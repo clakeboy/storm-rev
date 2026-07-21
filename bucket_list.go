@@ -201,5 +201,6 @@ func isStormTableBucket(b *bolt.Bucket) bool {
 
 // isStormSystemBucket reports whether name is reserved for Storm internal data.
 func isStormSystemBucket(name string) bool {
-	return name == dbinfo || name == metadataBucket
+	return name == dbinfo || name == metadataBucket ||
+		name == bleveOutboxBucket || name == bleveStateBucket
 }

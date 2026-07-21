@@ -72,150 +72,265 @@ func (n *node) init(tx *bolt.Tx, cfg *structConfig) error {
 }
 
 func (n *node) ReIndex(data any) error {
-	if data == nil {
-		return n.readWriteTx(func(tx *bolt.Tx) error {
-			return n.reIndexFromStoredMetadata(tx)
+	var concrete *structConfig
+	if data != nil {
+		ref := reflect.ValueOf(data)
+		if !ref.IsValid() || ref.Kind() != reflect.Ptr || ref.Elem().Kind() != reflect.Struct {
+			return ErrStructPtrNeeded
+		}
+		cfg, err := extract(&ref)
+		if err != nil {
+			return err
+		}
+		concrete = cfg
+	}
+
+	if n.tx != nil {
+		targets, err := n.collectReindexTargets(n.tx, concrete)
+		if err != nil {
+			return err
+		}
+		for _, target := range targets {
+			if concrete != nil {
+				bucket := n.GetBucket(n.tx, target.children...)
+				meta, err := newMeta(bucket, n)
+				if err != nil {
+					return err
+				}
+				if err := meta.setSchema(target.cfg); err != nil {
+					return err
+				}
+			}
+			n.markTxIndexDirty(target.cfg)
+		}
+		return nil
+	}
+
+	if concrete != nil {
+		n.s.indexCommitMu.Lock()
+		err := n.s.Bolt.Update(func(tx *bolt.Tx) error {
+			bucket := n.GetBucket(tx, concrete.Name)
+			if bucket == nil {
+				return ErrNotFound
+			}
+			meta, err := newMeta(bucket, n)
+			if err != nil {
+				return err
+			}
+			return meta.setSchema(concrete)
 		})
+		n.s.indexCommitMu.Unlock()
+		if err != nil {
+			return err
+		}
 	}
 
-	ref := reflect.ValueOf(data)
+	var targets []reindexTarget
+	err := n.s.Bolt.View(func(tx *bolt.Tx) error {
+		var err error
+		targets, err = n.collectReindexTargets(tx, concrete)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	for _, target := range targets {
+		target := target
+		n.s.indexCommitMu.Lock()
+		var through uint64
+		err := n.s.Bolt.View(func(tx *bolt.Tx) error {
+			through = durableOutboxSequence(tx)
+			return nil
+		})
+		if err != nil {
+			n.s.indexCommitMu.Unlock()
+			return err
+		}
+		req := n.s.indexer.submitRebuild(target.cfg.Name, func() error {
+			return n.reindexSnapshot(target, through)
+		})
+		n.s.indexCommitMu.Unlock()
+		if err := req.wait(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
-	if !ref.IsValid() || ref.Kind() != reflect.Ptr || ref.Elem().Kind() != reflect.Struct {
-		return ErrStructPtrNeeded
+type reindexTarget struct {
+	children []string
+	cfg      *structConfig
+}
+
+func (n *node) collectReindexTargets(tx *bolt.Tx, concrete *structConfig) ([]reindexTarget, error) {
+	if concrete != nil {
+		if n.GetBucket(tx, concrete.Name) == nil {
+			return nil, ErrNotFound
+		}
+		return []reindexTarget{{children: []string{concrete.Name}, cfg: concrete}}, nil
 	}
 
-	cfg, err := extract(&ref)
+	parent := n.GetBucket(tx)
+	if len(n.rootBucket) > 0 && parent == nil {
+		return nil, ErrNotFound
+	}
+	if len(n.rootBucket) > 0 && isStormTableBucket(parent) {
+		schema, err := readStoredSchema(parent)
+		if err != nil {
+			return nil, err
+		}
+		return []reindexTarget{{cfg: structConfigFromStoredSchema(schema)}}, nil
+	}
+
+	var targets []reindexTarget
+	appendBucket := func(name string, bucket *bolt.Bucket) error {
+		if !isStormTableBucket(bucket) {
+			return nil
+		}
+		schema, err := readStoredSchema(bucket)
+		if err != nil {
+			return err
+		}
+		targets = append(targets, reindexTarget{
+			children: []string{name},
+			cfg:      structConfigFromStoredSchema(schema),
+		})
+		return nil
+	}
+
+	if len(n.rootBucket) == 0 {
+		cursor := tx.Cursor()
+		for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
+			name := string(key)
+			if value != nil || isStormSystemBucket(name) {
+				continue
+			}
+			if err := appendBucket(name, tx.Bucket(key)); err != nil {
+				return nil, err
+			}
+		}
+	} else {
+		cursor := parent.Cursor()
+		for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
+			name := string(key)
+			if value != nil || isStormSystemBucket(name) {
+				continue
+			}
+			if err := appendBucket(name, parent.Bucket(key)); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if len(targets) == 0 {
+		return nil, ErrNotFound
+	}
+	return targets, nil
+}
+
+func (n *node) reindexSnapshot(target reindexTarget, through uint64) error {
+	if err := markDurableIndexTableDirty(n.s.Bolt, target.cfg.Name); err != nil {
+		return err
+	}
+	n.s.indexer.markDirty(target.cfg.Name)
+	var coverage *indexCoverage
+	err := n.s.Bolt.View(func(tx *bolt.Tx) error {
+		bucket := n.GetBucket(tx, target.children...)
+		if bucket == nil {
+			return ErrNotFound
+		}
+		var err error
+		coverage, err = n.s.indexer.rebuildFromBolt(target.cfg, bucket, n)
+		return err
+	})
 	if err != nil {
 		return err
 	}
 
-	return n.readWriteTx(func(tx *bolt.Tx) error {
-		bucket := n.GetBucket(tx, cfg.Name)
+	clean := false
+	err = n.s.Bolt.Update(func(tx *bolt.Tx) error {
+		bucket := n.GetBucket(tx, target.children...)
 		if bucket == nil {
 			return ErrNotFound
 		}
-
-		// A concrete struct is the caller's latest schema, so persist it before rebuilding.
 		meta, err := newMeta(bucket, n)
 		if err != nil {
 			return err
 		}
-		if err := meta.setSchema(cfg); err != nil {
+		if err := completeDurableReindex(tx, n.rootBucket, target.cfg.Name, through); err != nil {
 			return err
 		}
-
-		return n.reIndexBucket(tx, bucket, cfg)
+		state, err := durableIndexTableState(tx, target.cfg.Name)
+		if err != nil {
+			return err
+		}
+		if state.Desired > through {
+			return meta.invalidateIndexCoverage()
+		}
+		clean = !state.Dirty
+		if err := meta.setIndexCoverage(coverage); err != nil {
+			return err
+		}
+		return updateReindexIncrement(meta, bucket, target.cfg)
 	})
+	if err == nil && clean {
+		n.s.indexer.clearDirty(target.cfg.Name)
+	}
+	return err
 }
 
-func (n *node) reIndexFromStoredMetadata(tx *bolt.Tx) error {
-	if len(n.rootBucket) == 0 {
-		return n.reIndexRootTablesFromStoredMetadata(tx)
-	}
-
-	bucket := n.GetBucket(tx)
-	if bucket == nil {
-		return ErrNotFound
-	}
-	if isStormTableBucket(bucket) {
-		return n.reIndexStoredMetadataBucket(tx, bucket)
-	}
-
-	return n.reIndexDirectTablesFromStoredMetadata(tx, bucket)
-}
-
-// reIndexRootTablesFromStoredMetadata rebuilds direct table buckets at the DB root.
-func (n *node) reIndexRootTablesFromStoredMetadata(tx *bolt.Tx) error {
-	var rebuilt bool
-	c := tx.Cursor()
-	for k, v := c.First(); k != nil; k, v = c.Next() {
-		name := string(k)
-		if v != nil || isStormSystemBucket(name) {
-			continue
-		}
-		bucket := tx.Bucket(k)
-		if !isStormTableBucket(bucket) {
-			continue
-		}
-		if err := n.reIndexStoredMetadataBucket(tx, bucket); err != nil {
-			return err
-		}
-		rebuilt = true
-	}
-	if !rebuilt {
-		return ErrNotFound
-	}
-	return nil
-}
-
-// reIndexDirectTablesFromStoredMetadata rebuilds direct table buckets below the current node.
-func (n *node) reIndexDirectTablesFromStoredMetadata(tx *bolt.Tx, parent *bolt.Bucket) error {
-	var rebuilt bool
-	c := parent.Cursor()
-	for k, v := c.First(); k != nil; k, v = c.Next() {
-		name := string(k)
-		if v != nil || isStormSystemBucket(name) {
-			continue
-		}
-		bucket := parent.Bucket(k)
-		if !isStormTableBucket(bucket) {
-			continue
-		}
-		if err := n.reIndexStoredMetadataBucket(tx, bucket); err != nil {
-			return err
-		}
-		rebuilt = true
-	}
-	if !rebuilt {
-		return ErrNotFound
-	}
-	return nil
-}
-
-// reIndexStoredMetadataBucket rebuilds one table bucket using its persisted schema metadata.
-func (n *node) reIndexStoredMetadataBucket(tx *bolt.Tx, bucket *bolt.Bucket) error {
-	schema, err := readStoredSchema(bucket)
-	if err != nil {
-		return err
-	}
-	return n.reIndexBucket(tx, bucket, structConfigFromStoredSchema(schema))
-}
-
-func (n *node) reIndexBucket(tx *bolt.Tx, bucket *bolt.Bucket, cfg *structConfig) error {
-	coverage, err := n.s.indexer.rebuildFromBolt(cfg, bucket, n)
-	if err != nil {
-		return err
-	}
-	meta, err := newMeta(bucket, n)
-	if err != nil {
-		return err
-	}
-	if err := meta.setIndexCoverage(coverage); err != nil {
-		return err
-	}
-
-	if cfg.ID != nil && cfg.ID.Increment {
-		var lastID []byte
-		c := bucket.Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
-			if v == nil || bytes.Equal(k, []byte(metadataBucket)) {
-				continue
+func (n *node) reindexDurableTargets(targets []durableReindexTarget, through uint64) error {
+	for _, durableTarget := range targets {
+		targetNode := *n
+		targetNode.rootBucket = append([]string(nil), durableTarget.Root...)
+		var target reindexTarget
+		err := targetNode.s.Bolt.View(func(tx *bolt.Tx) error {
+			bucket := targetNode.GetBucket(tx, durableTarget.Table)
+			if bucket == nil {
+				return ErrNotFound
 			}
-			lastID = append(lastID[:0], k...)
-		}
-		if lastID != nil {
-			if err := meta.setIncrement(cfg.ID, lastID); err != nil {
+			schema, err := readStoredSchema(bucket)
+			if err != nil {
 				return err
 			}
+			target = reindexTarget{
+				children: []string{durableTarget.Table},
+				cfg:      structConfigFromStoredSchema(schema),
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if err := targetNode.reindexSnapshot(target, through); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func updateReindexIncrement(meta *meta, bucket *bolt.Bucket, cfg *structConfig) error {
+	if cfg.ID == nil || !cfg.ID.Increment {
+		return nil
+	}
+	var lastID []byte
+	cursor := bucket.Cursor()
+	for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
+		if value == nil || bytes.Equal(key, []byte(metadataBucket)) {
+			continue
+		}
+		lastID = append(lastID[:0], key...)
+	}
+	if lastID == nil {
+		return nil
+	}
+	return meta.setIncrement(cfg.ID, lastID)
 }
 
 type savedRecord struct {
 	cfg  *structConfig
 	data any
 	id   []byte
+	doc  map[string]any
 }
 
 type deletedRecord struct {
@@ -249,17 +364,34 @@ func (n *node) Save(data any) error {
 		return err
 	}
 
-	return n.readWriteTx(func(tx *bolt.Tx) error {
-		record, err := n.save(tx, cfg, data, false, nil)
+	if n.tx != nil {
+		return n.readWriteTx(func(tx *bolt.Tx) error {
+			record, err := n.save(tx, cfg, data, false, nil)
+			if err != nil {
+				return err
+			}
+			n.markTxIndexRecord(record)
+			return nil
+		})
+	}
+
+	n.s.indexCommitMu.Lock()
+	var record *savedRecord
+	var job *durableIndexJob
+	err = n.readWriteTx(func(tx *bolt.Tx) error {
+		var err error
+		record, err = n.save(tx, cfg, data, false, nil)
 		if err != nil {
 			return err
 		}
-		if n.tx != nil {
-			n.markTxIndexRecord(record)
-			return nil
-		}
-		return n.indexSavedRecords([]*savedRecord{record})
+		job, err = persistDurableIndexJob(tx, n.rootBucket, []*savedRecord{record}, nil, nil)
+		return err
 	})
+	if err != nil {
+		n.s.indexCommitMu.Unlock()
+		return err
+	}
+	return n.submitCommittedDurableIndexJob(job)
 }
 
 // SaveAll saves all structures in one Bolt write transaction and indexes them in batches.
@@ -269,7 +401,23 @@ func (n *node) SaveAll(data any) error {
 		return err
 	}
 
+	if n.tx != nil {
+		return n.readWriteTx(func(tx *bolt.Tx) error {
+			uniqueState := newSaveAllUniqueState(n)
+			for _, input := range inputs {
+				record, err := n.save(tx, input.cfg, input.data, false, uniqueState)
+				if err != nil {
+					return err
+				}
+				n.markTxIndexRecord(record)
+			}
+			return nil
+		})
+	}
+
+	n.s.indexCommitMu.Lock()
 	var records []*savedRecord
+	var job *durableIndexJob
 	err = n.readWriteTx(func(tx *bolt.Tx) error {
 		uniqueState := newSaveAllUniqueState(n)
 		records = records[:0]
@@ -282,20 +430,15 @@ func (n *node) SaveAll(data any) error {
 			records = append(records, record)
 		}
 
-		if n.tx != nil {
-			for _, record := range records {
-				n.markTxIndexRecord(record)
-			}
-		}
-		return nil
+		var err error
+		job, err = persistDurableIndexJob(tx, n.rootBucket, records, nil, nil)
+		return err
 	})
 	if err != nil {
+		n.s.indexCommitMu.Unlock()
 		return err
 	}
-	if n.tx != nil {
-		return nil
-	}
-	return n.indexSavedRecords(records)
+	return n.submitCommittedDurableIndexJob(job)
 }
 
 // saveConfig validates the public Save input and extracts per-record field metadata.
@@ -435,24 +578,70 @@ func (n *node) save(tx *bolt.Tx, cfg *structConfig, data any, update bool, uniqu
 		oldRaw = append([]byte(nil), oldRaw...)
 	}
 
-	if err := bucket.Put(id, raw); err != nil {
-		return nil, err
-	}
-	if err := meta.updateIndexCoverageAfterSave(cfg, oldRaw); err != nil {
+	record, err := n.prepareSavedRecord(cfg, data, id, oldRaw)
+	if err != nil {
 		return nil, err
 	}
 
-	record := &savedRecord{
-		cfg:  cfg,
-		data: data,
-		id:   append([]byte(nil), id...),
+	if err := bucket.Put(id, raw); err != nil {
+		return nil, err
 	}
+	if err := meta.updateIndexCoverageAfterSave(cfg, oldRaw, raw); err != nil {
+		return nil, err
+	}
+
 	if uniqueState != nil {
-		if err := uniqueState.recordSave(cfg, record.id); err != nil {
+		if err := uniqueState.recordSave(cfg, id); err != nil {
 			return nil, err
 		}
 	}
 	return record, nil
+}
+
+// prepareSavedRecord builds the exact Bleve document while the caller still
+// owns the Bolt transaction. Existing rows are decoded only to avoid emitting
+// an outbox mutation when every indexed value is unchanged.
+func (n *node) prepareSavedRecord(cfg *structConfig, data any, id, oldRaw []byte) (*savedRecord, error) {
+	if !configUsesBleve(cfg) {
+		return nil, nil
+	}
+
+	doc, err := n.s.indexer.document(cfg, data)
+	if err != nil {
+		return nil, err
+	}
+	if oldRaw != nil {
+		old := reflect.New(cfg.Type)
+		if err := n.codec.Unmarshal(oldRaw, old.Interface()); err != nil {
+			return nil, err
+		}
+		oldDoc, err := n.s.indexer.document(cfg, old.Interface())
+		if err != nil {
+			return nil, err
+		}
+		if reflect.DeepEqual(oldDoc, doc) {
+			return nil, nil
+		}
+	}
+
+	return &savedRecord{
+		cfg:  cfg,
+		data: data,
+		id:   append([]byte(nil), id...),
+		doc:  doc,
+	}, nil
+}
+
+func configUsesBleve(cfg *structConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, field := range cfg.Fields {
+		if field.Indexed() {
+			return true
+		}
+	}
+	return len(cfg.CompositeIndexes) > 0
 }
 
 // saveUniqueExists switches between normal unique checks and SaveAll's batch-local view.
@@ -586,7 +775,31 @@ func (n *node) update(data any, fn func(*reflect.Value, *reflect.Value, *structC
 
 	current := reflect.New(reflect.Indirect(ref).Type())
 
-	return n.readWriteTx(func(tx *bolt.Tx) error {
+	if n.tx != nil {
+		return n.readWriteTx(func(tx *bolt.Tx) error {
+			if err := n.WithTransaction(tx).One(cfg.ID.Name, cfg.ID.Value.Interface(), current.Interface()); err != nil {
+				return err
+			}
+
+			ref := reflect.ValueOf(data).Elem()
+			cref := current.Elem()
+			if err := fn(&ref, &cref, cfg); err != nil {
+				return err
+			}
+
+			record, err := n.save(tx, cfg, current.Interface(), true, nil)
+			if err != nil {
+				return err
+			}
+			n.markTxIndexRecord(record)
+			return nil
+		})
+	}
+
+	n.s.indexCommitMu.Lock()
+	var record *savedRecord
+	var job *durableIndexJob
+	err = n.readWriteTx(func(tx *bolt.Tx) error {
 		err = n.WithTransaction(tx).One(cfg.ID.Name, cfg.ID.Value.Interface(), current.Interface())
 		if err != nil {
 			return err
@@ -599,16 +812,18 @@ func (n *node) update(data any, fn func(*reflect.Value, *reflect.Value, *structC
 			return err
 		}
 
-		record, err := n.save(tx, cfg, current.Interface(), true, nil)
+		record, err = n.save(tx, cfg, current.Interface(), true, nil)
 		if err != nil {
 			return err
 		}
-		if n.tx != nil {
-			n.markTxIndexRecord(record)
-			return nil
-		}
-		return n.indexSavedRecords([]*savedRecord{record})
+		job, err = persistDurableIndexJob(tx, n.rootBucket, []*savedRecord{record}, nil, nil)
+		return err
 	})
+	if err != nil {
+		n.s.indexCommitMu.Unlock()
+		return err
+	}
+	return n.submitCommittedDurableIndexJob(job)
 }
 
 // Drop a bucket
@@ -627,9 +842,27 @@ func (n *node) Drop(data any) error {
 		bucketName = v.Interface().(string)
 	}
 
-	return n.readWriteTx(func(tx *bolt.Tx) error {
-		return n.drop(tx, bucketName)
+	if n.tx != nil {
+		return n.readWriteTx(func(tx *bolt.Tx) error {
+			return n.drop(tx, bucketName)
+		})
+	}
+
+	n.s.indexCommitMu.Lock()
+	var job *durableIndexJob
+	err := n.readWriteTx(func(tx *bolt.Tx) error {
+		if err := n.drop(tx, bucketName); err != nil {
+			return err
+		}
+		var err error
+		job, err = persistDurableIndexJob(tx, n.rootBucket, nil, nil, []string{bucketName})
+		return err
 	})
+	if err != nil {
+		n.s.indexCommitMu.Unlock()
+		return err
+	}
+	return n.submitCommittedDurableIndexJob(job)
 }
 
 func (n *node) drop(tx *bolt.Tx, bucketName string) error {
@@ -648,9 +881,8 @@ func (n *node) drop(tx *bolt.Tx, bucketName string) error {
 		if n.txIndexDrops != nil {
 			n.txIndexDrops[bucketName] = true
 		}
-		return nil
 	}
-	return n.s.indexer.dropTable(bucketName)
+	return nil
 }
 
 // DeleteStruct deletes a structure from the associated bucket
@@ -671,45 +903,58 @@ func (n *node) DeleteStruct(data any) error {
 		return err
 	}
 
-	return n.readWriteTx(func(tx *bolt.Tx) error {
-		return n.deleteStruct(tx, cfg, id)
+	if n.tx != nil {
+		return n.readWriteTx(func(tx *bolt.Tx) error {
+			record, err := n.deleteStruct(tx, cfg, id)
+			if err != nil {
+				return err
+			}
+			n.markTxIndexDelete(record)
+			return nil
+		})
+	}
+
+	n.s.indexCommitMu.Lock()
+	var record *deletedRecord
+	var job *durableIndexJob
+	err = n.readWriteTx(func(tx *bolt.Tx) error {
+		var err error
+		record, err = n.deleteStruct(tx, cfg, id)
+		if err != nil {
+			return err
+		}
+		job, err = persistDurableIndexJob(tx, n.rootBucket, nil, []*deletedRecord{record}, nil)
+		return err
 	})
+	if err != nil {
+		n.s.indexCommitMu.Unlock()
+		return err
+	}
+	return n.submitCommittedDurableIndexJob(job)
 }
 
-func (n *node) deleteStruct(tx *bolt.Tx, cfg *structConfig, id []byte) error {
+func (n *node) deleteStruct(tx *bolt.Tx, cfg *structConfig, id []byte) (*deletedRecord, error) {
 	bucket := n.GetBucket(tx, cfg.Name)
 	if bucket == nil {
-		return ErrNotFound
+		return nil, ErrNotFound
 	}
 
 	raw := bucket.Get(id)
 	if raw == nil {
-		return ErrNotFound
+		return nil, ErrNotFound
 	}
 	meta, err := newMeta(bucket, n)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := meta.updateIndexCoverageAfterDelete(cfg, raw); err != nil {
-		return err
+		return nil, err
 	}
 
 	if err := bucket.Delete(id); err != nil {
-		return err
+		return nil, err
 	}
-
-	if n.tx != nil {
-		n.markTxIndexDelete(&deletedRecord{
-			cfg: cfg,
-			id:  append([]byte(nil), id...),
-		})
-		return nil
-	}
-	if err := n.s.indexer.deleteRecord(cfg, id); err != nil {
-		n.s.indexer.markDirty(cfg.Name)
-		return err
-	}
-	return nil
+	return &deletedRecord{cfg: cfg, id: append([]byte(nil), id...)}, nil
 }
 
 func (n *node) markTxIndexDirty(cfg *structConfig) {

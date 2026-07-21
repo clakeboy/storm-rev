@@ -1,7 +1,9 @@
 package storm
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/clakeboy/storm-rev/v2/q"
 	"github.com/stretchr/testify/require"
@@ -107,6 +109,100 @@ func TestTransactionRollback(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestWritableTransactionDoesNotDeadlockConcurrentSave(t *testing.T) {
+	db, cleanup := createDB(t, BleveAsyncWrites())
+	defer cleanup()
+
+	tx, err := db.Begin(true)
+	require.NoError(t, err)
+	require.NoError(t, tx.Save(&IndexedNameUser{ID: 1, Name: "transaction"}))
+
+	saveStarted := make(chan struct{})
+	saveDone := make(chan error, 1)
+	go func() {
+		close(saveStarted)
+		saveDone <- db.Save(&IndexedNameUser{ID: 2, Name: "ordinary"})
+	}()
+	<-saveStarted
+
+	// Give the ordinary Save enough time to reach the ordering gate. Before the
+	// fix it acquired indexCommitMu and then waited for this transaction's Bolt
+	// writer, while Commit waited for indexCommitMu.
+	time.Sleep(50 * time.Millisecond)
+	commitDone := make(chan error, 1)
+	go func() { commitDone <- tx.Commit() }()
+
+	select {
+	case err := <-commitDone:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		require.FailNow(t, "explicit Commit deadlocked with ordinary Save")
+	}
+	select {
+	case err := <-saveDone:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		require.FailNow(t, "ordinary Save did not resume after explicit Commit")
+	}
+
+	require.NoError(t, db.FlushBleve(context.Background()))
+	var users []IndexedNameUser
+	require.NoError(t, db.Find("Name", "transaction", &users))
+	require.Len(t, users, 1)
+	require.NoError(t, db.Find("Name", "ordinary", &users))
+	require.Len(t, users, 1)
+}
+
+func TestWritableTransactionReleasesIndexCommitLock(t *testing.T) {
+	t.Run("commit without index work", func(t *testing.T) {
+		db, cleanup := createDB(t)
+		defer cleanup()
+		tx, err := db.Begin(true)
+		require.NoError(t, err)
+		require.NoError(t, tx.Set("raw", "key", "value"))
+		require.NoError(t, tx.Commit())
+		requireIndexCommitUnlocked(t, db)
+	})
+
+	t.Run("rollback", func(t *testing.T) {
+		db, cleanup := createDB(t)
+		defer cleanup()
+		tx, err := db.Begin(true)
+		require.NoError(t, err)
+		require.NoError(t, tx.Rollback())
+		requireIndexCommitUnlocked(t, db)
+	})
+
+	t.Run("commit error", func(t *testing.T) {
+		db, cleanup := createDB(t)
+		defer cleanup()
+		tx, err := db.Begin(true)
+		require.NoError(t, err)
+		n := tx.(*node)
+		require.NoError(t, n.tx.Rollback())
+		require.Error(t, tx.Commit())
+		requireIndexCommitUnlocked(t, db)
+	})
+
+	t.Run("begin error", func(t *testing.T) {
+		db, cleanup := createDB(t)
+		defer cleanup()
+		require.NoError(t, db.Close())
+		_, err := db.Begin(true)
+		require.Error(t, err)
+		requireIndexCommitUnlocked(t, db)
+	})
+}
+
+func requireIndexCommitUnlocked(t *testing.T, db *DB) {
+	t.Helper()
+	locked := db.indexCommitMu.TryLock()
+	require.True(t, locked, "indexCommitMu remained locked")
+	if locked {
+		db.indexCommitMu.Unlock()
+	}
+}
+
 func TestTransactionSaveAll(t *testing.T) {
 	db, cleanup := createDB(t)
 	defer cleanup()
@@ -161,6 +257,7 @@ func TestTransactionDeleteStructUsesIncrementalIndexDelete(t *testing.T) {
 	require.Len(t, ntx.txIndexDeletes["IndexedNameUser"], 1)
 
 	require.NoError(t, tx.Commit())
+	require.NoError(t, db.FlushBleve(context.Background()))
 
 	var users []IndexedNameUser
 	err = db.Find("Name", "John", &users)
@@ -191,6 +288,7 @@ func TestTransactionQueryDeleteUsesIncrementalIndexDelete(t *testing.T) {
 	require.Len(t, ntx.txIndexDeletes["IndexedNameUser"], 2)
 
 	require.NoError(t, tx.Commit())
+	require.NoError(t, db.FlushBleve(context.Background()))
 
 	var users []IndexedNameUser
 	err = db.Find("Name", "John", &users)
