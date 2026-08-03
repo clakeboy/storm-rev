@@ -558,7 +558,11 @@ func (n *node) save(tx *bolt.Tx, cfg *structConfig, data any, update bool, uniqu
 			continue
 		}
 
-		if fieldCfg.Index == tagUniqueIdx {
+		// The primary ID is already the Bolt bucket key, so it cannot conflict
+		// with a different record. Running the generic unique lookup for it is
+		// redundant and, while Bleve has pending work, falls back to decoding
+		// every record in the bucket.
+		if fieldCfg.Index == tagUniqueIdx && !fieldCfg.IsID {
 			exists, err := n.saveUniqueExists(tx, bucket, cfg, fieldName, fieldCfg.Value.Interface(), id, uniqueState)
 			if err != nil {
 				return nil, err

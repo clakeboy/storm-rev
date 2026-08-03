@@ -385,7 +385,7 @@ BoltDB remains the source of truth. Bleve indexes are derived data and can be re
 
 Indexed writes append a durable, sequence-ordered outbox entry in the same BoltDB transaction as the record change. After that transaction commits, one bounded coordinator combines concurrent work into Bleve batches. This keeps Bleve work outside Bolt's writer lock, prevents concurrent `Update` calls from creating an unbounded segment storm, and lets startup replay any committed index work that was not applied before a crash. Updates that do not change an indexed value skip Bleve entirely.
 
-Index writes are asynchronous by default: mutating APIs return after the Bolt transaction and durable outbox commit. Use `FlushBleve(ctx)` when an explicit index-visibility barrier is needed, or open the database with `BleveSyncWrites()` when every mutation must wait for Bleve and report Bleve errors directly. The coordinator queue is bounded, so asynchronous writers can still receive backpressure when Bleve cannot keep up. `BleveAsyncWrites()` remains available as an explicit declaration of the default behavior.
+Index writes are synchronous by default: mutating APIs return only after the corresponding durable outbox entry has been applied to Bleve, so an immediately following indexed-field query sees the committed change. Use `BleveAsyncWrites()` only when write throughput is more important than immediate index visibility; asynchronous callers can use `FlushBleve(ctx)` as an explicit visibility barrier. The coordinator queue is bounded, so asynchronous writers can still receive backpressure when Bleve cannot keep up. `BleveSyncWrites()` remains available as an explicit declaration of the default behavior.
 
 If an index hit points to a missing Bolt record, or an index update fails, the table index is marked dirty and indexed queries safely fall back to Bolt scans. Failed outbox entries are retried in sequence; repeated failures trigger an automatic rebuild. Pending entries and dirty state survive restart. Callers can also rebuild explicitly with:
 
@@ -673,13 +673,21 @@ Storm options are functions that can be passed when constructing you Storm insta
 
 #### Bleve write mode
 
-External-index writes are asynchronous by default:
+External-index writes are synchronous by default:
 
 ```go
 db, err := storm.Open("my.db")
 if err != nil {
   return err
 }
+```
+
+When a mutating API returns successfully, its indexed-field changes are visible to subsequent queries. The durable outbox and group-commit coordinator are still used internally, so concurrent writes are combined into bounded Bleve batches.
+
+Asynchronous mode is an explicit throughput-oriented option:
+
+```go
+db, err := storm.Open("my.db", storm.BleveAsyncWrites())
 
 ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 defer cancel()
@@ -687,12 +695,6 @@ err = db.FlushBleve(ctx)
 ```
 
 `FlushBleve` waits for both the durable outbox and the in-memory coordinator queue to drain. `Close` also drains healthy queued work; work that still fails remains in the Bolt outbox and is recovered on the next `Open`.
-
-Use synchronous mode only where the write call itself must wait for Bleve visibility or return a Bleve failure:
-
-```go
-db, err := storm.Open("my.db", storm.BleveSyncWrites())
-```
 
 #### BoltOptions
 

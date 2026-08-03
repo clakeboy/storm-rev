@@ -23,7 +23,7 @@ var defaultCodec = json.Sonic
 func Open(path string, stormOptions ...func(*Options) error) (*DB, error) {
 	var err error
 
-	opts := Options{bleveAsyncWrites: true}
+	var opts Options
 	for _, option := range stormOptions {
 		if err = option(&opts); err != nil {
 			return nil, err

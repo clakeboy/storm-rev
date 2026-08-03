@@ -69,8 +69,8 @@ func BleveBatchQueueSize(size int) func(*Options) error {
 	}
 }
 
-// BleveAsyncWrites explicitly selects the default asynchronous index behavior:
-// mutating APIs return after the Bolt transaction and durable outbox commit.
+// BleveAsyncWrites makes mutating APIs return after the Bolt transaction and
+// durable outbox commit, without waiting for Bleve index visibility.
 func BleveAsyncWrites() func(*Options) error {
 	return func(opts *Options) error {
 		opts.bleveAsyncWrites = true
@@ -78,9 +78,8 @@ func BleveAsyncWrites() func(*Options) error {
 	}
 }
 
-// BleveSyncWrites makes mutating APIs wait for their durable outbox entry to be
-// applied to Bleve. It is intended for callers that require synchronous index
-// visibility or immediate Bleve error reporting.
+// BleveSyncWrites explicitly selects the default synchronous behavior:
+// mutating APIs wait for their durable outbox entry to be applied to Bleve.
 func BleveSyncWrites() func(*Options) error {
 	return func(opts *Options) error {
 		opts.bleveAsyncWrites = false

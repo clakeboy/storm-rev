@@ -282,7 +282,7 @@ BoltDB 始终是事实数据源。Bleve 索引是可重建的派生数据，可�
 
 涉及索引的写入会在修改记录的同一个 BoltDB 事务中追加一条持久化、全局有序的 outbox 记录。事务提交后，由单个有界协调器把并发任务合并成 Bleve batch。这样 Bleve 工作不会占用 Bolt 写锁，大量并发 `Update` 也不会同时制造无界的 segment；进程异常退出后，下一次打开数据库会继续重放已提交但尚未写入 Bleve 的任务。未修改索引字段的 `Update` 会完全跳过 Bleve。
 
-默认改为异步索引语义：写 API 在 Bolt 事务和持久化 outbox 提交后即可返回。需要明确等待索引可见时调用 `FlushBleve(ctx)`；如果要求每次写调用都等待 Bleve 并直接返回 Bleve 错误，使用 `BleveSyncWrites()` 打开数据库。协调器队列有容量上限，因此 Bleve 长时间跟不上时，异步写入仍会受到背压。`BleveAsyncWrites()` 仍可用于显式声明默认行为。
+默认使用同步索引语义：写 API 只有在对应的持久化 outbox 已应用到 Bleve 后才返回，因此紧接着执行的索引字段查询能够看到刚提交的变更。只有在写吞吐优先于立即可见性时才显式使用 `BleveAsyncWrites()`；异步调用方可以用 `FlushBleve(ctx)` 建立明确的索引可见性屏障。协调器队列有容量上限，因此 Bleve 长时间跟不上时，异步写入仍会受到背压。`BleveSyncWrites()` 仍可用于显式声明默认行为。
 
 如果索引命中的记录在 BoltDB 中不存在，或者索引更新失败，对应表索引会被标记为 dirty，索引查询会安全回退到 Bolt 扫描。失败的 outbox 会严格按顺序重试；连续失败会自动触发全量重建。outbox 和 dirty 状态都可跨重启恢复，也可以显式调用 `ReIndex`。
 
@@ -473,13 +473,21 @@ return tx.Commit()
 
 ### Bleve 写入模式
 
-默认使用异步索引模式：
+默认使用同步索引模式：
 
 ```go
 db, err := storm.Open("my.db")
 if err != nil {
   return err
 }
+```
+
+写 API 成功返回时，对应的索引字段变更已经可供后续查询使用。底层仍然通过持久化 outbox 和 group commit 协调器，将并发写合并为有界 Bleve batch。
+
+异步模式是面向吞吐量的显式选项：
+
+```go
+db, err := storm.Open("my.db", storm.BleveAsyncWrites())
 
 ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 defer cancel()
@@ -487,12 +495,6 @@ err = db.FlushBleve(ctx)
 ```
 
 `FlushBleve` 会等待持久化 outbox 和内存协调器队列都清空。`Close` 也会排空正常任务；仍然失败的任务会保留在 Bolt outbox 中，并在下次 `Open` 时恢复。
-
-只有在写调用必须等待索引可见，或者需要直接获得 Bleve 写入错误时，才使用同步模式：
-
-```go
-db, err := storm.Open("my.db", storm.BleveSyncWrites())
-```
 
 ### BoltOptions
 

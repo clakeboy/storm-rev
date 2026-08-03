@@ -47,9 +47,63 @@ func TestUpdateNonIndexedFieldSkipsBleveOutbox(t *testing.T) {
 	require.Equal(t, "after", found[0].Note)
 }
 
-func TestBleveWritesAreAsyncByDefault(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "async.db")
+func TestBleveWritesAreSynchronousByDefault(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sync-default.db")
 	db, err := Open(path, BleveBatchDelay(time.Millisecond))
+	require.NoError(t, err)
+	defer db.Close()
+
+	require.NoError(t, db.Save(&durableOutboxUser{ID: 1, Name: "before"}))
+
+	batchStarted := make(chan struct{})
+	releaseBatch := make(chan struct{})
+	defer func() {
+		select {
+		case <-releaseBatch:
+		default:
+			close(releaseBatch)
+		}
+	}()
+	var once sync.Once
+	db.indexer.batchObserver = func(_ string, _ int, _ uint64) {
+		once.Do(func() {
+			close(batchStarted)
+			<-releaseBatch
+		})
+	}
+
+	updateDone := make(chan error, 1)
+	go func() {
+		updateDone <- db.UpdateField(&durableOutboxUser{ID: 1}, "Name", "after")
+	}()
+	select {
+	case <-batchStarted:
+	case <-time.After(2 * time.Second):
+		require.FailNow(t, "Bleve batch did not start")
+	}
+	select {
+	case err := <-updateDone:
+		require.NoError(t, err)
+		require.FailNow(t, "default synchronous update returned before Bleve persistence")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(releaseBatch)
+	select {
+	case err := <-updateDone:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		require.FailNow(t, "default synchronous update did not return after Bleve persistence")
+	}
+
+	var found []durableOutboxUser
+	require.NoError(t, db.Find("Name", "after", &found))
+	require.Len(t, found, 1)
+}
+
+func TestBleveAsyncWritesReturnBeforePersistence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "async.db")
+	db, err := Open(path, BleveAsyncWrites(), BleveBatchDelay(time.Millisecond))
 	require.NoError(t, err)
 	defer db.Close()
 

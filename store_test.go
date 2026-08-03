@@ -262,6 +262,125 @@ func TestSaveUnique(t *testing.T) {
 	require.Equal(t, ErrNotFound, db.One("Name", "John", &found))
 }
 
+func TestPrimaryIDSaveDoesNotScanWhileIndexPending(t *testing.T) {
+	db, cleanup := createDB(t)
+	defer cleanup()
+
+	type PendingIDUser struct {
+		ID   int    `storm:"id,increment"`
+		Name string `storm:"index"`
+	}
+
+	require.NoError(t, db.Save(&PendingIDUser{ID: 1, Name: "seed"}))
+	require.NoError(t, db.FlushBleve(context.Background()))
+
+	// A malformed unrelated record makes any fallback full-table decode fail.
+	// Primary-key uniqueness must not depend on decoding other records because
+	// the ID itself is already the Bolt bucket key.
+	require.NoError(t, db.Bolt.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte("PendingIDUser"))
+		require.NotNil(t, bucket)
+		key, err := toBytes(1000, db.Codec())
+		require.NoError(t, err)
+		return bucket.Put(key, []byte("{"))
+	}))
+
+	batchStarted := make(chan struct{})
+	releaseBatch := make(chan struct{})
+	var observerOnce sync.Once
+	db.indexer.batchObserver = func(_ string, _ int, _ uint64) {
+		observerOnce.Do(func() {
+			close(batchStarted)
+			<-releaseBatch
+		})
+	}
+	defer func() {
+		select {
+		case <-releaseBatch:
+		default:
+			close(releaseBatch)
+		}
+	}()
+
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- db.Save(&PendingIDUser{ID: 2, Name: "first"})
+	}()
+	select {
+	case <-batchStarted:
+	case <-time.After(2 * time.Second):
+		require.FailNow(t, "Bleve batch did not start")
+	}
+
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- db.Save(&PendingIDUser{ID: 3, Name: "second"})
+	}()
+
+	key, err := toBytes(3, db.Codec())
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		var exists bool
+		err := db.Bolt.View(func(tx *bolt.Tx) error {
+			bucket := tx.Bucket([]byte("PendingIDUser"))
+			exists = bucket != nil && bucket.Get(key) != nil
+			return nil
+		})
+		return err == nil && exists
+	}, 2*time.Second, 10*time.Millisecond, "second save did not commit while the index was pending")
+
+	close(releaseBatch)
+	require.NoError(t, <-firstDone)
+	require.NoError(t, <-secondDone)
+}
+
+func TestNonIDUniqueFieldStillScansWhileIndexPending(t *testing.T) {
+	db, cleanup := createDB(t)
+	defer cleanup()
+
+	type PendingUniqueUser struct {
+		ID    int    `storm:"id"`
+		Email string `storm:"unique"`
+		Name  string `storm:"index"`
+	}
+
+	require.NoError(t, db.Save(&PendingUniqueUser{ID: 1, Email: "taken@example.com", Name: "seed"}))
+	require.NoError(t, db.FlushBleve(context.Background()))
+
+	batchStarted := make(chan struct{})
+	releaseBatch := make(chan struct{})
+	var observerOnce sync.Once
+	db.indexer.batchObserver = func(_ string, _ int, _ uint64) {
+		observerOnce.Do(func() {
+			close(batchStarted)
+			<-releaseBatch
+		})
+	}
+	defer func() {
+		select {
+		case <-releaseBatch:
+		default:
+			close(releaseBatch)
+		}
+	}()
+
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- db.Save(&PendingUniqueUser{ID: 2, Email: "other@example.com", Name: "first"})
+	}()
+	select {
+	case <-batchStarted:
+	case <-time.After(2 * time.Second):
+		require.FailNow(t, "Bleve batch did not start")
+	}
+
+	err := db.Save(&PendingUniqueUser{ID: 3, Email: "taken@example.com", Name: "duplicate"})
+	require.Equal(t, ErrAlreadyExists, err)
+
+	close(releaseBatch)
+	require.NoError(t, <-firstDone)
+}
+
 func TestSaveUniqueStruct(t *testing.T) {
 	db, cleanup := createDB(t)
 	defer cleanup()
