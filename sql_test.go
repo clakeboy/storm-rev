@@ -73,6 +73,65 @@ func TestSQLFindProjectAndCount(t *testing.T) {
 	require.Equal(t, "admin", starRows[0]["team"])
 }
 
+func TestSQLWhereLike(t *testing.T) {
+	db, sql, cleanup := prepareSQLUsers(t)
+	defer cleanup()
+
+	require.NoError(t, db.Save(&SQLUser{Name: "50%off", Age: 20, Team: "guest", Active: false}))
+
+	count, err := sql.Count("SELECT COUNT(*) FROM SQLUser WHERE name LIKE 'A%'")
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+
+	count, err = sql.Count("SELECT COUNT(*) FROM SQLUser WHERE name LIKE ?", "B%")
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+
+	count, err = sql.Count("SELECT COUNT(*) FROM SQLUser WHERE name LIKE '_ob'")
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+
+	count, err = sql.Count("SELECT COUNT(*) FROM SQLUser WHERE name NOT LIKE '%a%'")
+	require.NoError(t, err)
+	require.Equal(t, 3, count)
+
+	count, err = sql.Count("SELECT COUNT(*) FROM SQLUser WHERE name LIKE '50!%off' ESCAPE '!'")
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+
+	var users []SQLUser
+	err = sql.Find("SELECT * FROM SQLUser WHERE name LIKE '%a%' ORDER BY name ASC", &users)
+	require.NoError(t, err)
+	require.Equal(t, []string{"Carol", "Dave"}, []string{users[0].Name, users[1].Name})
+
+	_, err = sql.Count("SELECT COUNT(*) FROM SQLUser WHERE age LIKE '3%'")
+	require.Error(t, err)
+}
+
+func TestSQLWhereLikeFromMetadata(t *testing.T) {
+	db, cleanup := createDB(t)
+	defer cleanup()
+
+	require.NoError(t, db.Init(&SQLUser{}))
+	require.NoError(t, db.SaveAll([]*SQLUser{
+		{Name: "Alice", Age: 31, Team: "staff", Active: true},
+		{Name: "Bob", Age: 22, Team: "admin", Active: true},
+		{Name: "Carol", Age: 17, Team: "guest", Active: false},
+	}))
+
+	sql, err := db.SQL()
+	require.NoError(t, err)
+
+	count, err := sql.Count("SELECT COUNT(*) FROM SQLUser WHERE name LIKE 'A%'")
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+
+	var rows []map[string]any
+	err = sql.Project("SELECT name FROM SQLUser WHERE name LIKE '%o%' ORDER BY name ASC", &rows)
+	require.NoError(t, err)
+	require.Equal(t, []map[string]any{{"name": "Bob"}, {"name": "Carol"}}, rows)
+}
+
 func TestSQLProjectAndCountFromMetadata(t *testing.T) {
 	db, cleanup := createDB(t)
 	defer cleanup()

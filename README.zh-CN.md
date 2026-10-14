@@ -440,7 +440,8 @@ result, err = sqlDB.WithAllowFullTableWrite(true).Exec("DELETE FROM User")
 当前 SQL 支持范围是有意收窄的：
 
 - 每条语句只支持单表；不支持 join、子查询、`GROUP BY`、`HAVING` 和 `DISTINCT`。
-- `WHERE` 支持 `=`、`!=`、`>`、`>=`、`<`、`<=`、`IN`、`NOT IN`、`AND`、`OR`、`NOT`、括号、字面量、布尔值、`NULL` 和 `?` 占位符。
+- `WHERE` 支持 `=`、`!=`、`>`、`>=`、`<`、`<=`、`IN`、`NOT IN`、`LIKE`、`NOT LIKE`、`AND`、`OR`、`NOT`、括号、字面量、布尔值、`NULL` 和 `?` 占位符。
+- `LIKE` 只作用于字符串字段；`%` 匹配任意长度字符，`_` 匹配单个字符，可选用 `ESCAPE` 指定转义字符使后续字符按字面量匹配。匹配区分大小写。
 - `ORDER BY` 支持一个或多个字段，但所有字段必须使用同一个排序方向。
 - `SELECT` 支持 `LIMIT` 和 offset。
 - `Find` 和 `First` 只接收 `SELECT *`；字段投影使用 `Project`，统计使用 `Count`。

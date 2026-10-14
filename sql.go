@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -971,9 +972,91 @@ func (s *SQL) matcherFromComparison(expr *sqlparser.ComparisonExpr, model *sqlMo
 			return q.Not(matcher), nil
 		}
 		return matcher, nil
+	case sqlparser.LikeStr, sqlparser.NotLikeStr:
+		return s.matcherFromLike(expr, model, field, reader)
 	default:
 		return nil, fmt.Errorf("%w: comparison %s", ErrUnsupportedSQL, expr.Operator)
 	}
+}
+
+// matcherFromLike converts a LIKE/NOT LIKE comparison into an anchored regexp matcher.
+// Only string and []byte fields are supported, matching the underlying q.Re matcher.
+func (s *SQL) matcherFromLike(expr *sqlparser.ComparisonExpr, model *sqlModel, field *fieldConfig, reader *sqlArgReader) (q.Matcher, error) {
+	pattern, err := s.likePattern(expr.Right, reader)
+	if err != nil {
+		return nil, err
+	}
+	escape, err := s.likeEscape(expr.Escape, reader)
+	if err != nil {
+		return nil, err
+	}
+	matcher := q.Re(model.queryFieldName(field), likeRegexp(pattern, escape))
+	if expr.Operator == sqlparser.NotLikeStr {
+		return q.Not(matcher), nil
+	}
+	return matcher, nil
+}
+
+// likePattern reads a LIKE pattern without converting it to the column type.
+func (s *SQL) likePattern(expr sqlparser.Expr, reader *sqlArgReader) (string, error) {
+	value, err := s.valueFromExpr(expr, nil, reader)
+	if err != nil {
+		return "", err
+	}
+	pattern, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("%w: like pattern", ErrUnsupportedSQL)
+	}
+	return pattern, nil
+}
+
+// likeEscape reads the optional ESCAPE character; zero means no escape character.
+func (s *SQL) likeEscape(expr sqlparser.Expr, reader *sqlArgReader) (rune, error) {
+	if expr == nil {
+		return 0, nil
+	}
+	value, err := s.valueFromExpr(expr, nil, reader)
+	if err != nil {
+		return 0, err
+	}
+	text, ok := value.(string)
+	if !ok || len([]rune(text)) != 1 {
+		return 0, fmt.Errorf("%w: like escape", ErrUnsupportedSQL)
+	}
+	return []rune(text)[0], nil
+}
+
+// likeRegexp translates a SQL LIKE pattern into a whole-string regular expression.
+// % matches any sequence, _ matches a single character, and the escape character
+// makes the following character literal.
+func likeRegexp(pattern string, escape rune) string {
+	var b strings.Builder
+	b.WriteString(`(?s)^`)
+	escaped := false
+	for _, r := range pattern {
+		if escaped {
+			b.WriteString(regexp.QuoteMeta(string(r)))
+			escaped = false
+			continue
+		}
+		if escape != 0 && r == escape {
+			escaped = true
+			continue
+		}
+		switch r {
+		case '%':
+			b.WriteString(".*")
+		case '_':
+			b.WriteString(".")
+		default:
+			b.WriteString(regexp.QuoteMeta(string(r)))
+		}
+	}
+	if escaped {
+		b.WriteString(regexp.QuoteMeta(string(escape)))
+	}
+	b.WriteString("$")
+	return b.String()
 }
 
 func (s *SQL) fieldFromExpr(expr sqlparser.Expr, model *sqlModel, table sqlTableRef) (*fieldConfig, error) {

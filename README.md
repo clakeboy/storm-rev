@@ -630,7 +630,8 @@ result, err = sqlDB.WithAllowFullTableWrite(true).Exec("DELETE FROM User")
 Supported SQL is intentionally limited:
 
 - One table per statement; joins, subqueries, `GROUP BY`, `HAVING`, and `DISTINCT` are not supported.
-- `WHERE` supports `=`, `!=`, `>`, `>=`, `<`, `<=`, `IN`, `NOT IN`, `AND`, `OR`, `NOT`, parentheses, literals, booleans, `NULL`, and `?` placeholders.
+- `WHERE` supports `=`, `!=`, `>`, `>=`, `<`, `<=`, `IN`, `NOT IN`, `LIKE`, `NOT LIKE`, `AND`, `OR`, `NOT`, parentheses, literals, booleans, `NULL`, and `?` placeholders.
+- `LIKE` only works on string columns; `%` matches any sequence, `_` matches one character, and an optional `ESCAPE` character makes the next character literal. Matching is case-sensitive.
 - `ORDER BY` supports one or more columns, but all columns must use the same direction.
 - `LIMIT`/offset are supported for `SELECT`.
 - `Find` and `First` require `SELECT *`; use `Project` for column lists and `Count` for `COUNT(*)`.
