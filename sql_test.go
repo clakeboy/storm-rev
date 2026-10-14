@@ -132,6 +132,59 @@ func TestSQLWhereLikeFromMetadata(t *testing.T) {
 	require.Equal(t, []map[string]any{{"name": "Bob"}, {"name": "Carol"}}, rows)
 }
 
+func TestSQLCountIgnoresOrderBy(t *testing.T) {
+	_, sql, cleanup := prepareSQLUsers(t)
+	defer cleanup()
+
+	count, err := sql.Count("SELECT COUNT(*) FROM SQLUser WHERE team = ? ORDER BY age DESC", "staff")
+	require.NoError(t, err)
+	require.Equal(t, 2, count)
+
+	count, err = sql.Count("SELECT COUNT(*) FROM SQLUser WHERE team = ? ORDER BY age DESC LIMIT 1", "staff")
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+
+	count, err = sql.Count("SELECT COUNT(*) FROM SQLUser ORDER BY name DESC LIMIT 3")
+	require.NoError(t, err)
+	require.Equal(t, 3, count)
+
+	count, err = sql.Count("SELECT COUNT(*) FROM SQLUser ORDER BY name DESC LIMIT 3 OFFSET 2")
+	require.NoError(t, err)
+	require.Equal(t, 2, count)
+
+	count, err = sql.Count("SELECT COUNT(*) FROM SQLUser LIMIT 0")
+	require.NoError(t, err)
+	require.Equal(t, 0, count)
+}
+
+func TestSQLCountIgnoresOrderByFromMetadata(t *testing.T) {
+	db, cleanup := createDB(t)
+	defer cleanup()
+
+	require.NoError(t, db.Init(&SQLUser{}))
+	require.NoError(t, db.SaveAll([]*SQLUser{
+		{Name: "Alice", Age: 31, Team: "staff", Active: true},
+		{Name: "Bob", Age: 22, Team: "admin", Active: true},
+		{Name: "Carol", Age: 17, Team: "guest", Active: false},
+		{Name: "Dave", Age: 42, Team: "staff", Active: true},
+	}))
+
+	sql, err := db.SQL()
+	require.NoError(t, err)
+
+	count, err := sql.Count("SELECT COUNT(*) FROM SQLUser WHERE team = ? ORDER BY age DESC LIMIT 1", "staff")
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+
+	count, err = sql.Count("SELECT COUNT(*) FROM SQLUser ORDER BY name DESC LIMIT 3 OFFSET 2")
+	require.NoError(t, err)
+	require.Equal(t, 2, count)
+
+	count, err = sql.Count("SELECT COUNT(*) FROM SQLUser LIMIT 0")
+	require.NoError(t, err)
+	require.Equal(t, 0, count)
+}
+
 func TestSQLProjectAndCountFromMetadata(t *testing.T) {
 	db, cleanup := createDB(t)
 	defer cleanup()

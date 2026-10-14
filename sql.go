@@ -208,7 +208,12 @@ func (s *SQL) Count(query string, args ...any) (int, error) {
 	if plan.model.metadataOnly() {
 		return s.countRawRecords(plan)
 	}
-	return s.queryFromPlan(plan).Count(reflect.New(plan.model.typ).Interface())
+	// ORDER BY cannot change a count, so drop it: the sorter then counts raw JSON
+	// matches through gjson without decoding every record back into its type.
+	countPlan := *plan
+	countPlan.orderBy = nil
+	countPlan.reverse = false
+	return s.queryFromPlan(&countPlan).Count(reflect.New(plan.model.typ).Interface())
 }
 
 // Exec executes INSERT, UPDATE, or DELETE and returns affected row metadata.
@@ -678,12 +683,47 @@ func (m *sqlModel) indexFieldUsesRawOrder(field *fieldConfig) bool {
 	}
 }
 
+// countRawRecords counts matching metadata records without sorting or decoding.
+// ORDER BY cannot change a count, so the WHERE matcher runs on raw JSON via gjson
+// and the scan stops as soon as LIMIT/OFFSET are satisfied.
 func (s *SQL) countRawRecords(plan *sqlSelectPlan) (int, error) {
-	records, err := s.selectRawRecords(plan)
+	if plan.limit == 0 {
+		return 0, nil
+	}
+	count := 0
+	matched := 0
+	err := s.node.readTx(func(tx *bolt.Tx) error {
+		bucket := s.node.GetBucket(tx, plan.model.table)
+		if bucket == nil {
+			return nil
+		}
+		cursor := bucket.Cursor()
+		for key, raw := cursor.First(); key != nil; key, raw = cursor.Next() {
+			if raw == nil || bytes.Equal(key, []byte(metadataBucket)) {
+				continue
+			}
+			ok, err := plan.matcher.Match(raw)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				continue
+			}
+			matched++
+			if matched <= plan.skip {
+				continue
+			}
+			if plan.limit >= 0 && count >= plan.limit {
+				break
+			}
+			count++
+		}
+		return nil
+	})
 	if err != nil {
 		return 0, err
 	}
-	return len(records), nil
+	return count, nil
 }
 
 func sortRawRecords(records []sqlRawRecord, orderBy []string, reverse bool) {

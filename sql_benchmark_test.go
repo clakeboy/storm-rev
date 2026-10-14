@@ -111,6 +111,30 @@ func BenchmarkSQLTranslationCount(b *testing.B) {
 			sqlBenchCountSink = count
 		}
 	})
+
+	// Baseline matching the pre-optimization SQL path, which sorted and decoded
+	// every matched record even for a count.
+	b.Run("OriginalSelectCountOrderByLimit", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			count, err := db.Select(q.Eq("Team", "staff")).OrderBy("Age").Limit(10).Count(new(SQLBenchUser))
+			if err != nil {
+				b.Fatal(err)
+			}
+			sqlBenchCountSink = count
+		}
+	})
+
+	b.Run("SQLCountOrderByLimit", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			count, err := sql.Count("SELECT COUNT(*) FROM SQLBenchUser WHERE team = ? ORDER BY age ASC LIMIT 10", "staff")
+			if err != nil {
+				b.Fatal(err)
+			}
+			sqlBenchCountSink = count
+		}
+	})
 }
 
 func BenchmarkSQLTranslationProject(b *testing.B) {
