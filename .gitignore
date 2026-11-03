@@ -37,3 +37,5 @@ _testmain.go
 /dbs/
 # qeury test
 query2_test.go
+
+.trae
